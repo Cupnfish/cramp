@@ -3,9 +3,6 @@
 **An [MCP (Model Control Protocol)](https://mcp.z2x.dev/) Toolbox Service for Agentic Rust Development.**
 **(Repository: [cupnfish/cramp](https://github.com/cupnfish/cramp))**
 
-[![Rust](https://github.com/cupnfish/cramp/actions/workflows/rust.yml/badge.svg)](https://github.com/cupnfish/cramp/actions/workflows/rust.yml) 
-<!-- Add more badges here if needed -->
-
 CRAMP provides a suite of 7 workflow-driven tools, exposed via the MCP protocol, designed specifically to enable LLM Agents to autonomously understand, diagnose, edit, fix, and test Rust code projects. 
 It acts as a bridge between an LLM Agent and the Rust ecosystem tools (`cargo`, `rust-analyzer`).
 
@@ -137,8 +134,18 @@ cramp --help
 
 ## Running
 
-CRAMP can run with different MCP transports.
+CRAMP can run with different MCP transports and includes built-in documentation features.
 Use `--help` for options: `cargo run -- --help` or `target/release/cramp --help`.
+
+### Available Commands
+
+CRAMP supports the following subcommands:
+
+- **`stdio`** - Run MCP server using Standard Input/Output transport
+- **`sse`** - Run MCP server using Server-Sent Events over HTTP
+- **`stream-http`** - Run MCP server using Streamable HTTP transport
+- **`doc <readme|rule>`** - View documentation interactively with syntax highlighting
+- **`rule <path>`** - Export cramp_rule.md content to a specified file path
 
 ### Command Line Options
 
@@ -192,6 +199,41 @@ cargo run --release -- stream-http --host 0.0.0.0 --port 9001 --path /api/mcp
 cargo run --release -- stream-http --stateful-mode false --initial-wait 60
 ```
 The service gracefully shuts down (including all managed `rust-analyzer` processes) on `Ctrl+C`.
+
+### Documentation Commands
+
+CRAMP includes built-in documentation viewing capabilities:
+
+#### View Documentation Interactively
+```bash
+# View README.md in an interactive pager with syntax highlighting
+cargo run --release -- doc readme
+
+# View cramp_rule.md (agent interaction rules) interactively
+cargo run --release -- doc rule
+```
+
+The interactive pager supports:
+- **Navigation**: Use arrow keys, `j`/`k`, Page Up/Down, Home/End, or `g`/`G` to scroll
+- **Commands**: Press `:` to enter command mode
+  - `:copy` - Copy content to clipboard
+  - `:write <filename>` - Write content to a file
+- **Exit**: Press `q` to quit
+- **Syntax highlighting**: Automatic markdown formatting with colors (when supported)
+
+#### Export Rule Content
+```bash
+# Write the cramp_rule.md content to a specific file
+cargo run --release -- rule /path/to/output/rules.md
+
+# Example: Export rules to current directory
+cargo run --release -- rule ./my_cramp_rules.md
+```
+
+This is useful for:
+- Sharing agent interaction guidelines with team members
+- Including rules in your project documentation
+- Creating custom rule variations
 
 ## Contributing
 Contributions are welcome! Please open an issue or submit a pull request.
