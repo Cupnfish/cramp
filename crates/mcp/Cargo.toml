@@ -1,0 +1,18 @@
+[package]
+name = "cramp-mcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+lsp = { path = "../lsp",package = "cramp-lsp" }
+rmcp = { workspace = true, features = [
+    "server",
+    "transport-sse-server",
+    "transport-io",
+    "transport-streamable-http-server",
+    "macros",
+    "schemars",
+] }
+serde = { workspace = true, features = ["derive"] }
+tracing = { workspace = true }

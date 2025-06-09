@@ -1,0 +1,40 @@
+[package]
+name = "cramp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Assuming mcp crate is in ../crates/mcp relative to this crate
+mcp = { path = "../mcp", package = "cramp-mcp" }
+rmcp = { workspace = true, features = [
+    "server",
+    "transport-sse-server",
+    "transport-io",
+    "transport-streamable-http-server",
+    "macros",
+    "schemars",
+    "auth",                             # Needed for some server configs even if not directly used here
+] }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "io-std",
+    "signal",
+    "net",
+] }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = [
+    "env-filter",
+    "std",
+    "fmt",
+] }
+clap = { workspace = true, features = ["derive"] }
+axum = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+
+serde = { workspace = true, features = ["derive"] }
+arboard = { workspace = true }
+crossterm = { workspace = true, features = ["events"] }
