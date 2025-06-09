@@ -193,8 +193,24 @@ impl RaServer {
             initial_wait // Log the wait time
         );
         // *** PERFORMANCE: Allow more time for initial indexing ***
-        tokio::time::sleep(initial_wait).await;
-        info!("[{}] Wait complete, server ready.", project_name);
+        // Show indexing progress during the wait
+        let progress_interval = std::cmp::min(initial_wait.as_secs() / 10, 10); // Update every 10% or max 10 seconds
+        let progress_interval = std::cmp::max(progress_interval, 1); // At least 1 second
+        let total_steps = initial_wait.as_secs() / progress_interval;
+        
+        for step in 1..=total_steps {
+            tokio::time::sleep(Duration::from_secs(progress_interval)).await;
+            let progress_percent = (step * 100) / total_steps;
+            info!("[{}] Indexing progress: {}% ({}/{})", project_name, progress_percent, step, total_steps);
+        }
+        
+        // Sleep for any remaining time
+        let remaining_time = initial_wait.as_secs() % progress_interval;
+        if remaining_time > 0 {
+            tokio::time::sleep(Duration::from_secs(remaining_time)).await;
+        }
+        
+        info!("[{}] Indexing complete, server ready.", project_name);
         // **********************************************************
 
         Ok(server)

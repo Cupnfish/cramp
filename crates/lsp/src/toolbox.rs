@@ -60,6 +60,87 @@ impl Toolbox {
             initial_wait: Duration::from_secs(initial_wait),
         }
     }
+
+    /// Get a reference to the servers map for interactive commands
+    pub fn servers(&self) -> &DashMap<String, Arc<RaServer>> {
+        &self.servers
+    }
+
+    /// Add a new server to the servers map
+    pub async fn add_server(&self, name: String, path: PathBuf) -> ToolResult<String> {
+        if self.servers.contains_key(&name) {
+            return Err(ToolboxError::Other(format!("Project '{}' already exists", name)));
+        }
+        
+        let server = RaServer::start_with_timeouts(
+            &path,
+            name.clone(),
+            self.request_timeout,
+            self.shutdown_timeout,
+            self.initial_wait,
+        )
+        .await
+        .map_err(ToolboxError::ServerError)?;
+        
+        self.servers.insert(name.clone(), server);
+        Ok(format!("Successfully added project '{}'", name))
+    }
+
+    /// Remove a server from the servers map
+    pub async fn remove_server(&self, name: &str) -> ToolResult<String> {
+        if let Some((_, server)) = self.servers.remove(name) {
+            server.shutdown().await.map_err(ToolboxError::ServerError)?;
+            self.clear_all_cache_for_project(name);
+            
+            // Clear active project if it was the removed one
+            let mut active = self.active_project.write().await;
+            if active.as_ref() == Some(&name.to_string()) {
+                *active = None;
+            }
+            
+            Ok(format!("Successfully removed project '{}'", name))
+        } else {
+            Err(ToolboxError::ProjectNotFound(name.to_string()))
+        }
+    }
+
+    /// Set the active project
+    pub async fn set_active_project(&self, name: &str) -> ToolResult<String> {
+        if !self.servers.contains_key(name) {
+            return Err(ToolboxError::ProjectNotFound(name.to_string()));
+        }
+        
+        *self.active_project.write().await = Some(name.to_string());
+        self.clear_all_cache_for_project(name);
+        Ok(format!("Successfully set active project to '{}'", name))
+    }
+
+    /// List all projects
+    pub async fn list_projects(&self) -> ToolResult<String> {
+        let active = self.active_project.read().await;
+        let mut result = String::new();
+        
+        if self.servers.is_empty() {
+            result.push_str("No projects loaded.\n");
+        } else {
+            result.push_str("Loaded projects:\n");
+            for entry in self.servers.iter() {
+                let name = entry.key();
+                let server = entry.value();
+                let is_active = active.as_ref() == Some(name);
+                let status = if is_active { " (active)" } else { "" };
+                result.push_str(&format!("  - {}: {}{}\n", name, server.root_path().display(), status));
+            }
+        }
+        
+        if let Some(active_name) = active.as_ref() {
+            result.push_str(&format!("\nActive project: {}\n", active_name));
+        } else {
+            result.push_str("\nNo active project set.\n");
+        }
+        
+        Ok(result)
+    }
     // --- Internal Helpers ---
 
     async fn get_active_server(&self) -> ToolResult<(String, Arc<RaServer>)> {

@@ -139,11 +139,21 @@ Use `--help` for options: `cargo run -- --help` or `target/release/cramp --help`
 
 ### Available Commands
 
-CRAMP supports the following subcommands:
+CRAMP supports the following commands:
 
+**Server Commands:**
 - **`stdio`** - Run MCP server using Standard Input/Output transport
 - **`sse`** - Run MCP server using Server-Sent Events over HTTP
 - **`stream-http`** - Run MCP server using Streamable HTTP transport
+
+**Control Commands:**
+- **`list`** - List all projects in the server
+- **`add <path>`** - Add a new project from the specified path
+- **`remove <name>`** - Remove a project by name
+- **`set-active <name>`** - Set the active project by name
+- **`status`** - Check server status
+
+**Documentation Commands:**
 - **`doc <readme|rule>`** - View documentation interactively with syntax highlighting
 - **`rule <path>`** - Export cramp_rule.md content to a specified file path
 
@@ -157,11 +167,16 @@ CRAMP supports the following subcommands:
 - `--initial-wait <SECONDS>`: Wait time for initial indexing in seconds. Default: `125`
 - `--sse-keep-alive <SECONDS>`: SSE Keep Alive in seconds for StreamHttp and SSE transports. Default: `300`
 - `--stateful-mode <BOOL>`: Enable stateful mode for StreamHttp transport. Default: `true`
+- `--enable-control-api <BOOL>`: Enable the control API. Default: `true`
+- `--control-port <PORT>`: Port for the control API when using Stdio transport. Default: `8081`
+- `--no-proxy`: Disable proxy for HTTP requests (for control commands)
 
-**Logging Examples:**
+**Examples:**
 - `cargo run -- --log-level debug stdio`
 - `RUST_LOG=cramp=info,lsp=debug cargo run -- --allow-env-log sse`
 - `cargo run -- --log-level trace --request-timeout 300 stdio`
+- `cargo run -- add /path/to/project --server-url http://127.0.0.1:8081/control`
+- `cargo run -- list --no-proxy`
 
 ### Stdio
 Communicates over standard input and output.
@@ -199,6 +214,35 @@ cargo run --release -- stream-http --host 0.0.0.0 --port 9001 --path /api/mcp
 cargo run --release -- stream-http --stateful-mode false --initial-wait 60
 ```
 The service gracefully shuts down (including all managed `rust-analyzer` processes) on `Ctrl+C`.
+
+### Control Commands
+
+CRAMP provides control commands to manage projects on a running server:
+
+```bash
+# List all projects
+cargo run --release -- list
+
+# Add a new project
+cargo run --release -- add /path/to/rust/project
+
+# Remove a project by name
+cargo run --release -- remove my-project
+
+# Set active project
+cargo run --release -- set-active my-project
+
+# Check server status
+cargo run --release -- status
+
+# Use custom server URL (for non-default ports)
+cargo run --release -- list --server-url http://127.0.0.1:8081/control
+
+# Disable proxy for requests
+cargo run --release -- add /path/to/project --no-proxy
+```
+
+**Note:** Control commands connect to the server's control API. The default URL is `http://127.0.0.1:8080/control` for HTTP transports and `http://127.0.0.1:8081/control` for stdio transport.
 
 ### Documentation Commands
 
