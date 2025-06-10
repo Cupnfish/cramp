@@ -7,17 +7,6 @@ use std::sync::Arc;
 use tracing::error;
 
 // Define parameter structures for tools
-#[derive(Debug, Deserialize, JsonSchema)]
-struct ManageProjectsRequest {
-    #[schemars(
-        description = "The path to load a new project, or the name of an existing project to set as active. Omit to just list projects. Activating a project returns a snapshot (tree, initial diagnostics)."
-    )]
-    project_path_or_name: Option<String>,
-    #[schemars(
-        description = "The name of a project to remove from the workspace. Removal happens before adding/selecting."
-    )]
-    remove_project_name: Option<String>,
-}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ListDiagnosticsRequest {
@@ -148,20 +137,6 @@ impl McpToolboxService {
 #[tool(tool_box)]
 impl McpToolboxService {
     #[tool(
-        description = "Manages Rust projects in the workspace: loads new projects from filesystem paths, switches between existing projects, removes projects, or lists all loaded projects. All other tools operate exclusively on the currently active project. When a project is activated (loaded or selected), returns a comprehensive snapshot including project file tree, initial cargo check diagnostics summary, workspace status, and next step guidance for efficient workflow."
-    )]
-    async fn manage_projects(
-        &self,
-        #[tool(aggr)] req: ManageProjectsRequest,
-    ) -> Result<CallToolResult, McpError> {
-        to_mcp_result(|| {
-            self.toolbox
-                .manage_projects(req.project_path_or_name, req.remove_project_name)
-        })
-        .await
-    }
-
-    #[tool(
         description = "Executes `cargo check` on the active Rust project to detect compilation errors and warnings. Returns a comprehensive JSON list of diagnostics with file paths, line/character positions (0-based), severity levels, and detailed error messages. Supports optional filtering by specific file path and result limiting. This tool must be run before `get_code_actions` to populate the diagnostic cache. Invalidates all previously cached fix IDs when executed."
     )]
     async fn list_diagnostics(
@@ -254,52 +229,67 @@ impl McpToolboxService {
 const INSTRUCTIONS: &str = r###"
 # CRAMP MCP Server - Rust Project Analysis & Repair Tools
 
-This server provides 9 specialized tools for intelligent interaction with Rust projects, enabling automated analysis, diagnosis, and repair of code issues.
+This server provides specialized tools for intelligent interaction with Rust projects, enabling automated analysis, diagnosis, and repair of code issues.
+
+## Available Tools
+
+### Diagnostic Tools
+- **`list_diagnostics`**: Execute `cargo check` to detect compilation errors and warnings
+- **`get_code_actions`**: Retrieve available automatic fixes for specific diagnostics
+- **`apply_fix`**: Apply automatic code fixes using fix IDs
+
+### Analysis Tools
+- **`get_file_tree`**: Generate project directory structure
+- **`list_document_symbols`**: List symbols within a specific file
+- **`get_symbol_info`**: Get detailed information about a specific symbol
+- **`search_workspace_symbols`**: Search for symbols across the entire project
+
+### Testing Tools
+- **`test_project`**: Run the project's test suite
 
 ## Core Principles
-- **Active Project Context**: All tools (except `manage_projects`) operate exclusively on the currently active project
 - **0-Based Indexing**: All line and character numbers are 0-based throughout the system
 - **Relative Paths**: All file paths are relative to the active project root directory
 - **Cache Management**: Critical state invalidation rules must be followed for correct operation
 - **Client I/O Responsibility**: Your environment handles file reading/writing (except `apply_fix`)
 
-## Essential Workflow (MUST Follow)
+## Essential Workflow
 
-### 1. Project Setup
-- **`manage_projects`**: Load project from filesystem path or switch between existing projects
-- Returns comprehensive snapshot: file tree, initial diagnostics, workspace status, next steps
-
-### 2. Diagnosis Phase
+### Diagnosis Phase
 - **`list_diagnostics`**: Execute `cargo check` to detect compilation errors/warnings
-- CRITICAL: Must run before `get_code_actions` - populates diagnostic cache
-- CRITICAL: Invalidates ALL previously cached fix IDs when executed
+  - Optional parameters: `file_path` (filter by file), `limit` (max results), `force_recheck` (bypass cache)
+  - CRITICAL: Must run before `get_code_actions` - populates diagnostic cache
+  - CRITICAL: Invalidates ALL previously cached fix IDs when executed
 
-### 3. Investigation & Analysis
+### Investigation & Analysis
 - **`get_file_tree`**: Understand project structure and organization
 - **`list_document_symbols`**: Analyze symbols within specific files (JSON output)
+  - Requires: `file_path` (relative to project root)
 - **`search_workspace_symbols`**: Find symbols across entire project with fuzzy matching
+  - Requires: `query` (search term)
 - **`get_symbol_info`**: Get detailed API documentation and signatures (Markdown output)
   - Requires: `file_path` AND EITHER `line`/`character` (0-based) OR `symbol_name`
 - **Client-side file reading**: Use your environment to read source code content
 
-### 4. Automated Repair
+### Automated Repair
 - **`get_code_actions`**: Retrieve available automatic fixes for specific diagnostics
-  - Requires EXACT `file_path` and `diagnostic_message` from most recent `list_diagnostics`
+  - Requires: `file_path` and `diagnostic_message` (exact strings from `list_diagnostics`)
   - Returns fix actions with unique `id`, description, and diff preview
 - **`apply_fix`**: Apply automatic fix using fix_id from `get_code_actions`
+  - Requires: `fix_id` (from `get_code_actions`)
   - CRITICAL: Invalidates ALL fix IDs and diagnostic cache for entire project
   - CRITICAL: MUST run `list_diagnostics` again after applying any fix
 
-### 5. Manual Repair (when auto-fix unavailable)
+### Manual Repair (when auto-fix unavailable)
 - Use investigation tools to understand the issue
 - Apply manual code changes via client-side I/O
 - CRITICAL: Manual edits make server cache stale - MUST run `list_diagnostics` afterward
 
-### 6. Verification
+### Verification
 - **`list_diagnostics`**: Verify compilation errors are resolved
 - **`test_project`**: Run test suite to ensure correctness and catch regressions
+  - Optional parameter: `test_name` (filter tests by name/pattern)
   - CRITICAL: Running tests invalidates ALL fix IDs and diagnostic cache
-  - Supports filtering by test name/pattern for targeted testing
 
 ## Critical Cache Invalidation Rules
 
@@ -313,13 +303,40 @@ This server provides 9 specialized tools for intelligent interaction with Rust p
 - Re-run `list_diagnostics` to refresh diagnostic cache
 - Obtain new fix IDs from `get_code_actions` if needed
 
+## Parameter Details
+
+### list_diagnostics
+- `file_path` (optional): Filter diagnostics for specific file
+- `limit` (optional): Maximum number of diagnostics to return
+- `force_recheck` (optional): Force fresh check instead of using cache
+
+### get_code_actions
+- `file_path` (required): Relative file path from diagnostics
+- `diagnostic_message` (required): Exact diagnostic message from `list_diagnostics`
+
+### apply_fix
+- `fix_id` (required): Unique fix ID from `get_code_actions`
+
+### list_document_symbols
+- `file_path` (required): Relative path to file
+
+### get_symbol_info
+- `file_path` (required): Relative path to file containing symbol
+- `line` (optional): 0-based line number
+- `character` (optional): 0-based character number
+- `symbol_name` (optional): Name of symbol to find
+
+### search_workspace_symbols
+- `query` (required): Search term for symbol names
+
+### test_project
+- `test_name` (optional): Filter tests by name or pattern
+
 ## Success Criteria
 Task completion requires:
 1. `list_diagnostics` reports no compilation errors
 2. `test_project` shows all tests passing
 3. No regressions introduced
-
-**Always follow the 'Next Step' guidance provided in each tool's response for optimal workflow efficiency.**
 "###;
 
 #[tool(tool_box)]

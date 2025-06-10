@@ -7,6 +7,7 @@ authors.workspace = true
 [dependencies]
 # Assuming mcp crate is in ../crates/mcp relative to this crate
 mcp = { path = "../mcp", package = "cramp-mcp" }
+assets = { path = "../assets", package = "cramp-assets" }
 rmcp = { workspace = true, features = [
     "server",
     "transport-sse-server",

@@ -9,7 +9,9 @@ use tokio::task::JoinError;
 
 #[derive(Error, Debug)]
 pub enum ToolboxError {
-    #[error("No active project is set. Use `manage_projects` first.")]
+    #[error(
+        "No active project is set. Use `add_server` to load a project and `set_active_project` to select it."
+    )]
     NoActiveProject,
     #[error("Project '{0}' not found or not loaded.")]
     ProjectNotFound(String),

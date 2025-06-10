@@ -532,6 +532,7 @@ dependencies = [
  "axum",
  "clap",
  "comrak",
+ "cramp-assets",
  "cramp-mcp",
  "crossterm",
  "futures",
@@ -546,6 +547,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "cramp-assets"
+version = "0.1.0"
 
 [[package]]
 name = "cramp-lsp"

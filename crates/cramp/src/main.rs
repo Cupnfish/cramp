@@ -1,11 +1,5 @@
 use anyhow::{Context, Result};
-use axum::{
-    Json, Router,
-    extract::{Path as AxumPath, State},
-    http::StatusCode,
-    response::IntoResponse,
-    routing::{delete, get, post},
-};
+use axum::Router;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use mcp::McpToolboxService;
 use rmcp::{
@@ -17,7 +11,7 @@ use rmcp::{
         streamable_http_server::{StreamableHttpService, session::local::LocalSessionManager},
     },
 };
-use serde::{Deserialize, Serialize};
+
 use std::{
     io::{self, Write},
     net::SocketAddr,
@@ -46,11 +40,13 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 // Default constants
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8080;
-const DEFAULT_CONTROL_PORT: u16 = 8081; // Separate port for stdio control
 const DEFAULT_SSE_PATH: &str = "/sse";
 const DEFAULT_MESSAGE_PATH: &str = "/message";
 const DEFAULT_STREAM_HTTP_PATH: &str = "/mcp";
-const CONTROL_API_PATH: &str = "/control";
+const DEFAULT_REQUEST_TIMEOUT: u64 = 210;
+const DEFAULT_SHUTDOWN_TIMEOUT: u64 = 130;
+const DEFAULT_INITIAL_WAIT: u64 = 125;
+const DEFAULT_SSE_KEEP_ALIVE: u64 = 300;
 
 // --- CLI Structure ---
 
@@ -58,183 +54,118 @@ const CONTROL_API_PATH: &str = "/control";
 #[command(name = "cramp")]
 #[command(version, about = "CRAMP: CLI Runner and Controller for MCP Toolbox Service", long_about = None)]
 struct Cli {
+    /// The subcommand to execute
     #[command(subcommand)]
     command: Command,
 
+    /// Set the logging level [default: info]
     #[arg(short, long, value_enum, default_value_t = LogLevel::Info, global = true)]
     log_level: LogLevel,
+
+    /// Allow overriding log level via RUST_LOG environment variable
     #[arg(long, default_value_t = false, global = true)]
     allow_env_log: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
-    /// Run the MCP Toolbox server with stdio transport
-    Stdio {
-        #[command(flatten)]
-        serve_args: ServeArgsFlat,
-    },
-    /// Run the MCP Toolbox server with SSE transport
-    Sse {
-        #[arg(long, default_value = DEFAULT_HOST)]
-        host: String,
-        #[arg(long, default_value_t = DEFAULT_PORT)]
-        port: u16,
-        #[arg(long, default_value = DEFAULT_SSE_PATH)]
-        sse_path: String,
-        #[arg(long, default_value = DEFAULT_MESSAGE_PATH)]
-        message_path: String,
-        #[command(flatten)]
-        serve_args: ServeArgsFlat,
-    },
-    /// Run the MCP Toolbox server with StreamHttp transport
-    StreamHttp {
-        #[arg(long, default_value = DEFAULT_HOST)]
-        host: String,
-        #[arg(long, default_value_t = DEFAULT_PORT)]
-        port: u16,
-        #[arg(long, default_value = DEFAULT_STREAM_HTTP_PATH)]
-        path: String,
-        #[command(flatten)]
-        serve_args: ServeArgsFlat,
-    },
-    /// List projects
-    List {
-        #[command(flatten)]
-        control_args: ControlArgsFlat,
-    },
-    /// Add a new project from path (and activate it)
-    Add {
-        path: PathBuf,
-        #[command(flatten)]
-        control_args: ControlArgsFlat,
-    },
-    /// Remove a project by name
-    Remove {
-        name: String,
-        #[command(flatten)]
-        control_args: ControlArgsFlat,
-    },
-    /// Set the active project by name
-    SetActive {
-        name: String,
-        #[command(flatten)]
-        control_args: ControlArgsFlat,
-    },
-    /// Check server status
-    Status {
-        #[command(flatten)]
-        control_args: ControlArgsFlat,
-    },
     /// View documentation (README or cramp_rule)
     Doc {
+        /// Type of documentation to view
         #[arg(value_enum)]
         doc_type: DocType,
     },
-    /// Write rule content to specified file path
-    Rule { path: PathBuf },
+    /// Rule management commands
+    #[command(subcommand)]
+    Rule(RuleCommand),
+    #[command(flatten)]
+    TransportCommand(TransportCommand),
 }
 
 #[derive(Args, Debug, Clone)]
 struct ServeArgs {
-    #[command(subcommand)]
-    transport: TransportCommand,
-    /// Enable the control API
-    #[arg(long, default_value_t = true, global = true)]
-    enable_control_api: bool,
-    /// Port for the control API when using Stdio transport
-    #[arg(long, default_value_t = DEFAULT_CONTROL_PORT, global = true)]
-    control_port: u16,
+    /// Timeout duration (in seconds) for individual requests
+    #[arg(long, default_value_t = DEFAULT_REQUEST_TIMEOUT)]
+    pub request_timeout: u64,
 
-    #[arg(long, default_value_t = 210, global = true)]
-    request_timeout: u64,
-    #[arg(long, default_value_t = 130, global = true)]
-    shutdown_timeout: u64,
-    #[arg(long, default_value_t = 125, global = true)]
-    initial_wait: u64,
-    #[arg(long, default_value_t = 300, global = true)]
-    sse_keep_alive: u64,
-    #[arg(long, default_value_t = true, global = true)]
-    stateful_mode: bool,
-}
+    /// Timeout duration (in seconds) for graceful shutdown
+    #[arg(long, default_value_t = DEFAULT_SHUTDOWN_TIMEOUT)]
+    pub shutdown_timeout: u64,
 
-#[derive(Args, Debug, Clone)]
-struct ServeArgsFlat {
-    /// Enable the control API
-    #[arg(long, default_value_t = true, global = true)]
-    enable_control_api: bool,
-    /// Port for the control API when using Stdio transport
-    #[arg(long, default_value_t = DEFAULT_CONTROL_PORT, global = true)]
-    control_port: u16,
-
-    #[arg(long, default_value_t = 210, global = true)]
-    request_timeout: u64,
-    #[arg(long, default_value_t = 130, global = true)]
-    shutdown_timeout: u64,
-    #[arg(long, default_value_t = 125, global = true)]
-    initial_wait: u64,
-    #[arg(long, default_value_t = 300, global = true)]
-    sse_keep_alive: u64,
-    #[arg(long, default_value_t = true, global = true)]
-    stateful_mode: bool,
-}
-
-#[derive(Args, Debug, Clone)]
-struct ControlArgs {
-    #[command(subcommand)]
-    action: ControlAction,
-    /// Base URL for the server's control API (e.g., http://127.0.0.1:8080/control or http://127.0.0.1:8081/control for stdio)
-    #[arg(long, default_value = "http://127.0.0.1:8080/control", global = true)]
-    server_url: String,
-    /// Disable proxy for HTTP requests
-    #[arg(long, default_value_t = true, global = true)]
-    no_proxy: bool,
-}
-
-#[derive(Args, Debug, Clone)]
-struct ControlArgsFlat {
-    /// Base URL for the server's control API (e.g., http://127.0.0.1:8080/control or http://127.0.0.1:8081/control for stdio)
-    #[arg(long, default_value = "http://127.0.0.1:8080/control", global = true)]
-    server_url: String,
-    /// Disable proxy for HTTP requests
-    #[arg(long, default_value_t = true, global = true)]
-    no_proxy: bool,
+    /// Initial waiting period (in seconds) before service starts processing requests
+    #[arg(long, default_value_t = DEFAULT_INITIAL_WAIT)]
+    pub initial_wait: u64,
 }
 
 #[derive(Subcommand, Debug, Clone)]
-enum ControlAction {
-    /// List projects
-    List,
-    /// Add a new project from path (and activate it)
-    Add { path: PathBuf },
-    /// Remove a project by name
-    Remove { name: String },
-    /// Set the active project by name
-    SetActive { name: String },
-    /// Check server status
-    Status,
+enum RuleCommand {
+    /// Write rule content to custom file path
+    Export {
+        /// Path where the rule content will be written
+        path: PathBuf,
+    },
+    /// Write rule content to Trae IDE rules directory
+    Trae,
+    /// Write rule content to Cursor IDE rules directory
+    Cursor,
+    /// Write rule content to VS Code workspace settings
+    Vscode,
+    /// Write rule content to Zed IDE settings
+    Zed,
 }
 
 #[derive(Subcommand, Debug, Clone)]
 enum TransportCommand {
-    Stdio,
+    /// Run with stdio transport
+    Stdio {
+        /// Path to the active project
+        project_path: PathBuf,
+        #[command(flatten)]
+        args: ServeArgs,
+    },
+    /// Run with SSE transport
     Sse {
+        /// Path to the active project
+        project_path: PathBuf,
+        /// Host address to bind the SSE server to
         #[arg(long, default_value = DEFAULT_HOST)]
         host: String,
+        /// Port number to bind the SSE server to
         #[arg(long, default_value_t = DEFAULT_PORT)]
         port: u16,
+        /// Path for SSE event stream endpoint
         #[arg(long, default_value = DEFAULT_SSE_PATH)]
         sse_path: String,
+        /// Path for message posting endpoint
         #[arg(long, default_value = DEFAULT_MESSAGE_PATH)]
         message_path: String,
+        /// SSE keep-alive interval in seconds
+        #[arg(long, default_value_t = DEFAULT_SSE_KEEP_ALIVE)]
+        sse_keep_alive: u64,
+        #[command(flatten)]
+        args: ServeArgs,
     },
+    /// Run with StreamHttp transport
     StreamHttp {
+        /// Path to the active project
+        project_path: PathBuf,
+        /// Host address to bind the HTTP server to
         #[arg(long, default_value = DEFAULT_HOST)]
         host: String,
+        /// Port number to bind the HTTP server to
         #[arg(long, default_value_t = DEFAULT_PORT)]
         port: u16,
+        /// Base path for streamable HTTP endpoints
         #[arg(long, default_value = DEFAULT_STREAM_HTTP_PATH)]
         path: String,
+        /// SSE keep-alive interval in seconds
+        #[arg(long, default_value_t = DEFAULT_SSE_KEEP_ALIVE)]
+        sse_keep_alive: u64,
+        /// Whether to run in stateful mode (maintain session state)
+        #[arg(long, default_value_t = true)]
+        stateful_mode: bool,
+        #[command(flatten)]
+        args: ServeArgs,
     },
 }
 
@@ -294,114 +225,67 @@ async fn main() -> Result<()> {
     init_logging(cli.log_level, cli.allow_env_log);
 
     match cli.command {
-        Command::Stdio { serve_args } => {
-            let args = ServeArgs {
-                transport: TransportCommand::Stdio,
-                enable_control_api: serve_args.enable_control_api,
-                control_port: serve_args.control_port,
-                request_timeout: serve_args.request_timeout,
-                shutdown_timeout: serve_args.shutdown_timeout,
-                initial_wait: serve_args.initial_wait,
-                sse_keep_alive: serve_args.sse_keep_alive,
-                stateful_mode: serve_args.stateful_mode,
-            };
-            run_server(args).await
-        }
-        Command::Sse {
-            host,
-            port,
-            sse_path,
-            message_path,
-            serve_args,
-        } => {
-            let args = ServeArgs {
-                transport: TransportCommand::Sse {
-                    host,
-                    port,
-                    sse_path,
-                    message_path,
-                },
-                enable_control_api: serve_args.enable_control_api,
-                control_port: serve_args.control_port,
-                request_timeout: serve_args.request_timeout,
-                shutdown_timeout: serve_args.shutdown_timeout,
-                initial_wait: serve_args.initial_wait,
-                sse_keep_alive: serve_args.sse_keep_alive,
-                stateful_mode: serve_args.stateful_mode,
-            };
-            run_server(args).await
-        }
-        Command::StreamHttp {
-            host,
-            port,
-            path,
-            serve_args,
-        } => {
-            let args = ServeArgs {
-                transport: TransportCommand::StreamHttp { host, port, path },
-                enable_control_api: serve_args.enable_control_api,
-                control_port: serve_args.control_port,
-                request_timeout: serve_args.request_timeout,
-                shutdown_timeout: serve_args.shutdown_timeout,
-                initial_wait: serve_args.initial_wait,
-                sse_keep_alive: serve_args.sse_keep_alive,
-                stateful_mode: serve_args.stateful_mode,
-            };
-            run_server(args).await
-        }
-        Command::List { control_args } => {
-            let args = ControlArgs {
-                action: ControlAction::List,
-                server_url: control_args.server_url,
-                no_proxy: control_args.no_proxy,
-            };
-            run_control_client(args).await
-        }
-        Command::Add { path, control_args } => {
-            let args = ControlArgs {
-                action: ControlAction::Add { path },
-                server_url: control_args.server_url,
-                no_proxy: control_args.no_proxy,
-            };
-            run_control_client(args).await
-        }
-        Command::Remove { name, control_args } => {
-            let args = ControlArgs {
-                action: ControlAction::Remove { name },
-                server_url: control_args.server_url,
-                no_proxy: control_args.no_proxy,
-            };
-            run_control_client(args).await
-        }
-        Command::SetActive { name, control_args } => {
-            let args = ControlArgs {
-                action: ControlAction::SetActive { name },
-                server_url: control_args.server_url,
-                no_proxy: control_args.no_proxy,
-            };
-            run_control_client(args).await
-        }
-        Command::Status { control_args } => {
-            let args = ControlArgs {
-                action: ControlAction::Status,
-                server_url: control_args.server_url,
-                no_proxy: control_args.no_proxy,
-            };
-            run_control_client(args).await
-        }
+        Command::TransportCommand(transport) => run_server(transport).await,
         Command::Doc { doc_type } => show_documentation(doc_type),
-        Command::Rule { path } => write_rule_to_file(&path),
+        Command::Rule(rule_cmd) => handle_rule_command(rule_cmd),
     }
 }
 
 // --- Server Runner ---
-async fn run_server(args: ServeArgs) -> Result<()> {
+async fn run_server(transport: TransportCommand) -> Result<()> {
     info!("Starting CRAMP MCP Toolbox Service...");
+
+    let (project_path, args) = match &transport {
+        TransportCommand::Stdio { project_path, args } => (project_path.clone(), args.clone()),
+        TransportCommand::Sse {
+            project_path, args, ..
+        } => (project_path.clone(), args.clone()),
+        TransportCommand::StreamHttp {
+            project_path, args, ..
+        } => (project_path.clone(), args.clone()),
+    };
+
+    let final_args = args;
+
     let service = Arc::new(McpToolboxService::with_timeouts(
-        args.request_timeout,
-        args.shutdown_timeout,
-        args.initial_wait,
+        final_args.request_timeout,
+        final_args.shutdown_timeout,
+        final_args.initial_wait,
     ));
+
+    // Initialize the service with the project path
+    info!("Initializing service with project path: {:?}", project_path);
+    let project_name = project_path
+        .canonicalize()
+        .map_err(|e| warn!("Failed to canonicalize path: {}", e))
+        .ok()
+        .and_then(|p| {
+            p.file_name()
+                .and_then(|name| name.to_str())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| {
+            warn!("Could not determine project name from path, using default");
+            "project".to_string()
+        });
+    if let Err(e) = service
+        .toolbox
+        .initialize_project(project_name, project_path)
+        .await
+    {
+        error!("Failed to initialize project: {}", e);
+        return Err(e.into());
+    }
+
+    // Wait for initial indexing to complete before starting MCP service
+    info!("Waiting for rust-analyzer indexing to complete...");
+    if let Err(e) = service.toolbox.wait_for_indexing_complete().await {
+        error!("Failed to wait for indexing completion: {}", e);
+        return Err(e.into());
+    }
+    
+    info!("Project initialized successfully");
+
     let shutdown_token = CancellationToken::new();
 
     let ctrl_c_token = shutdown_token.clone();
@@ -414,31 +298,16 @@ async fn run_server(args: ServeArgs) -> Result<()> {
         ctrl_c_token.cancel();
     });
 
-    let control_router = if args.enable_control_api {
-        Some(control_api_router(service.clone()))
-    } else {
-        info!("Control API is disabled.");
-        None
-    };
-
-    let server_result = match args.transport {
-        TransportCommand::Stdio => {
-            // Stdio needs a separate HTTP server for control API
-            run_stdio(
-                service.clone(),
-                shutdown_token.clone(),
-                control_router,
-                args.control_port,
-            )
-            .await
-        }
+    let server_result = match transport {
+        TransportCommand::Stdio { .. } => run_stdio(service.clone(), shutdown_token.clone()).await,
         TransportCommand::Sse {
             host,
             port,
             sse_path,
             message_path,
+            sse_keep_alive,
+            ..
         } => {
-            // Merge control API into the main HTTP server
             run_http_server(
                 service.clone(),
                 shutdown_token.clone(),
@@ -450,23 +319,27 @@ async fn run_server(args: ServeArgs) -> Result<()> {
                         shutdown_token.clone(),
                         &sse_path,
                         &message_path,
-                        args.sse_keep_alive,
+                        sse_keep_alive,
                     )
                 },
-                control_router,
                 "SSE",
             )
             .await
         }
-        TransportCommand::StreamHttp { host, port, path } => {
-            // Merge control API into the main HTTP server
+        TransportCommand::StreamHttp {
+            host,
+            port,
+            path,
+            sse_keep_alive,
+            stateful_mode,
+            ..
+        } => {
             run_http_server(
                 service.clone(),
                 shutdown_token.clone(),
                 &host,
                 port,
-                |s| create_stream_http_router(s, &path, args.sse_keep_alive, args.stateful_mode),
-                control_router,
+                |s| create_stream_http_router(s, &path, sse_keep_alive, stateful_mode),
                 "Streamable HTTP",
             )
             .await
@@ -487,12 +360,7 @@ async fn run_server(args: ServeArgs) -> Result<()> {
 // --- Transport Runners ---
 
 #[instrument(skip_all)]
-async fn run_stdio(
-    service: Arc<McpToolboxService>,
-    token: CancellationToken,
-    control_router: Option<Router>,
-    control_port: u16,
-) -> Result<()> {
+async fn run_stdio(service: Arc<McpToolboxService>, token: CancellationToken) -> Result<()> {
     info!("Transport: Standard I/O. Connect client to stdin/stdout.");
 
     let stdio_future = async {
@@ -506,32 +374,9 @@ async fn run_stdio(
         Ok::<(), anyhow::Error>(())
     };
 
-    match control_router {
-        Some(router) => {
-            let addr = SocketAddr::from_str(&format!("{}:{}", DEFAULT_HOST, control_port))?;
-            info!(
-                "Control API listening on: http://{}{} ",
-                addr, CONTROL_API_PATH
-            );
-            let listener = tokio::net::TcpListener::bind(addr).await?;
-            let control_app = Router::new().nest(CONTROL_API_PATH, router);
-            let control_future = axum::serve(listener, control_app)
-                .with_graceful_shutdown(token.clone().cancelled_owned());
-
-            // Run both concurrently
-            tokio::select! {
-                res = stdio_future => res.context("Stdio error"),
-                res = control_future => res.context("Control API server error"),
-                 _ = token.cancelled() => { info!("Stdio/Control shutdown requested."); Ok(())}
-            }
-        }
-        None => {
-            // Only run stdio
-            tokio::select! {
-                 res = stdio_future => res.context("Stdio error"),
-                  _ = token.cancelled() => { info!("Stdio shutdown requested."); Ok(())}
-            }
-        }
+    tokio::select! {
+         res = stdio_future => res.context("Stdio error"),
+          _ = token.cancelled() => { info!("Stdio shutdown requested."); Ok(())}
     }
 }
 
@@ -543,7 +388,6 @@ async fn run_http_server<F>(
     host: &str,
     port: u16,
     router_factory: F,
-    control_router: Option<Router>,
     transport_name: &'static str,
 ) -> Result<()>
 where
@@ -555,15 +399,7 @@ where
     info!("Listening on: http://{}", addr);
     info!("Press Ctrl+C to exit.");
 
-    let mut app = router_factory(service);
-
-    if let Some(ctrl_router) = control_router {
-        info!(
-            "Control API available at: http://{}{}",
-            addr, CONTROL_API_PATH
-        );
-        app = app.nest(CONTROL_API_PATH, ctrl_router);
-    }
+    let app = router_factory(service);
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -619,204 +455,14 @@ fn create_stream_http_router(
     Router::new().nest_service(path, http_service)
 }
 
-// --- Control API Handlers & Router ---
-
-#[derive(Serialize, Deserialize)]
-struct AddProjectRequest {
-    path: PathBuf,
-}
-
-#[derive(Serialize, Deserialize)]
-struct StatusResponse {
-    status: String,
-    message: Option<String>,
-}
-
-type SharedState = State<Arc<McpToolboxService>>;
-type ApiResult = std::result::Result<Json<StatusResponse>, (StatusCode, String)>;
-
-async fn list_projects_handler(
-    State(service): SharedState,
-) -> std::result::Result<String, (StatusCode, String)> {
-    service
-        .toolbox
-        .list_projects()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-}
-
-async fn add_project_handler(
-    State(service): SharedState,
-    Json(req): Json<AddProjectRequest>,
-) -> ApiResult {
-    let name = req
-        .path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-    info!(
-        "Control API: Adding project '{}' from '{}'",
-        name,
-        req.path.display()
-    );
-    service
-        .toolbox
-        .add_server(name.clone(), req.path.clone())
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to add: {}", e),
-            )
-        })?;
-    // Auto-activate
-    service
-        .toolbox
-        .set_active_project(&name)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Added but failed to activate: {}", e),
-            )
-        })?;
-
-    Ok(Json(StatusResponse {
-        status: "ok".into(),
-        message: Some(format!("Added and activated project '{}'", name)),
-    }))
-}
-
-async fn remove_project_handler(
-    State(service): SharedState,
-    AxumPath(name): AxumPath<String>,
-) -> ApiResult {
-    info!("Control API: Removing project '{}'", name);
-    let msg = service
-        .toolbox
-        .remove_server(&name)
-        .await
-        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
-    Ok(Json(StatusResponse {
-        status: "ok".into(),
-        message: Some(msg),
-    }))
-}
-
-async fn set_active_handler(
-    State(service): SharedState,
-    AxumPath(name): AxumPath<String>,
-) -> ApiResult {
-    info!("Control API: Activating project '{}'", name);
-    let msg = service
-        .toolbox
-        .set_active_project(&name)
-        .await
-        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
-    Ok(Json(StatusResponse {
-        status: "ok".into(),
-        message: Some(msg),
-    }))
-}
-
-async fn status_handler() -> impl IntoResponse {
-    (StatusCode::OK, "Server is running")
-}
-
-fn control_api_router(service: Arc<McpToolboxService>) -> Router {
-    Router::new()
-        .route(
-            "/projects",
-            get(list_projects_handler).post(add_project_handler),
-        )
-        .route("/projects/{name}", delete(remove_project_handler))
-        .route("/projects/{name}/activate", post(set_active_handler))
-        .route("/status", get(status_handler))
-        .with_state(service)
-}
-
-// --- Control Client ---
-#[instrument(skip_all)]
-async fn run_control_client(args: ControlArgs) -> Result<()> {
-    let mut client_builder = reqwest::Client::builder();
-    if args.no_proxy {
-        client_builder = client_builder.no_proxy();
-    }
-    let client = client_builder.build()?;
-    let base_url = args.server_url.trim_end_matches('/');
-    info!("Connecting to control API at: {}", base_url);
-
-    let response = match args.action {
-        ControlAction::Status => client.get(format!("{}/status", base_url)).send().await?,
-        ControlAction::List => client.get(format!("{}/projects", base_url)).send().await?,
-        ControlAction::Add { path } => {
-            let absolute_path = if path.is_absolute() {
-                path
-            } else {
-                std::env::current_dir()?.join(path)
-            };
-            let payload = AddProjectRequest {
-                path: absolute_path,
-            };
-            client
-                .post(format!("{}/projects", base_url))
-                .json(&payload)
-                .send()
-                .await?
-        }
-        ControlAction::Remove { name } => {
-            client
-                .delete(format!("{}/projects/{}", base_url, name))
-                .send()
-                .await?
-        }
-        ControlAction::SetActive { name } => {
-            client
-                .post(format!("{}/projects/{}/activate", base_url, name))
-                .send()
-                .await?
-        }
-    };
-
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .unwrap_or_else(|_| "<no body>".to_string());
-
-    if status.is_success() {
-        println!("SUCCESS ({}):", status);
-        // Try parsing JSON message if it looks like it
-        if body.starts_with('{') {
-            if let Ok(json) = serde_json::from_str::<StatusResponse>(&body) {
-                println!("{}", json.message.unwrap_or(json.status));
-            } else {
-                println!("{}", body); // Print raw body if not our StatusResponse
-            }
-        } else {
-            println!("{}", body); // Print raw body (e.g. from list)
-        }
-    } else {
-        eprintln!("ERROR ({}):", status);
-        eprintln!("{}", body);
-        std::process::exit(1);
-    }
-    Ok(())
-}
-
 // +----------------------------------------------------------------++
 // | --- Doc / Rule Functions (Kept from original) ------------------ |
 // +-----------------------------------------------------------------+
 fn show_documentation(doc_type: DocType) -> Result<()> {
     info!("Displaying documentation: {:?}", doc_type);
     let (content, display_name, file_name) = match doc_type {
-        DocType::Readme => (include_str!("../../../README.md"), "README", "README.md"),
-        DocType::Rule => (
-            include_str!("../../../cramp_rule.md"),
-            "CRAMP Rules",
-            "cramp_rule.md",
-        ),
+        DocType::Readme => (assets::get_readme(), "README", "README.md"),
+        DocType::Rule => (assets::get_rule(), "CRAMP Rules", "cramp_rule.md"),
     };
     use std::io::IsTerminal;
     let use_colors = std::io::stderr().is_terminal();
@@ -996,13 +642,117 @@ fn copy_to_clipboard_impl(content: &str) -> Result<()> {
     Clipboard::new()?.set_text(content)?;
     Ok(())
 }
-fn write_rule_to_file(path: &Path) -> Result<()> {
+fn handle_rule_command(rule_cmd: RuleCommand) -> Result<()> {
+    match rule_cmd {
+        RuleCommand::Export { path } => write_rule_to_custom_path(&path),
+        RuleCommand::Trae => write_rule_to_ide_path(".trae/rules/project_rules.md", "Trae"),
+        RuleCommand::Cursor => write_rule_to_ide_path(".cursorrules", "Cursor"),
+        RuleCommand::Vscode => write_rule_to_vscode(),
+        RuleCommand::Zed => write_rule_to_ide_path(".zed/rules.md", "Zed"),
+    }
+}
+
+fn write_rule_to_custom_path(path: &Path) -> Result<()> {
     use std::fs;
-    let rule_content = include_str!("../../../cramp_rule.md");
+    let rule_content = assets::get_rule();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("Failed to create dir {:?}", parent))?;
     }
     fs::write(path, rule_content).with_context(|| format!("Failed to write to {:?}", path))?;
     info!("Rule content written to: {:?}", path);
+    Ok(())
+}
+
+fn write_rule_to_ide_path(target_path_str: &str, ide_name: &str) -> Result<()> {
+    use std::fs;
+    use std::path::Path;
+
+    let rule_content = assets::get_rule();
+    let target_path = Path::new(target_path_str);
+
+    // Create directory if it doesn't exist
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("Failed to create dir {:?}", parent))?;
+    }
+
+    // Check if file exists and has different content
+    if target_path.exists() {
+        let existing_content = fs::read_to_string(target_path)
+            .with_context(|| format!("Failed to read existing file {:?}", target_path))?;
+
+        if existing_content != rule_content {
+            // Create backup with timestamp
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let backup_path = format!("{}.backup.{}", target_path_str, timestamp);
+
+            fs::copy(target_path, &backup_path)
+                .with_context(|| format!("Failed to create backup at {}", backup_path))?;
+
+            info!(
+                "Existing {} rules file backed up to: {}",
+                ide_name, backup_path
+            );
+        } else {
+            info!(
+                "{} rules file content is identical, no changes needed.",
+                ide_name
+            );
+            return Ok(());
+        }
+    }
+
+    // Write the new content
+    fs::write(target_path, rule_content)
+        .with_context(|| format!("Failed to write to {:?}", target_path))?;
+
+    info!(
+        "Rule content written to {} rules file: {:?}",
+        ide_name, target_path
+    );
+    Ok(())
+}
+
+fn write_rule_to_vscode() -> Result<()> {
+    use std::fs;
+    use std::path::Path;
+
+    let rule_content = assets::get_rule();
+    let vscode_dir = Path::new(".vscode");
+    let settings_path = vscode_dir.join("settings.json");
+
+    // Create .vscode directory if it doesn't exist
+    fs::create_dir_all(vscode_dir).with_context(|| "Failed to create .vscode directory")?;
+
+    // Read existing settings or create new ones
+    let mut settings = if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)
+            .with_context(|| "Failed to read existing VS Code settings")?;
+        serde_json::from_str::<serde_json::Value>(&content)
+            .unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    // Add or update the cramp rules in settings
+    if let Some(obj) = settings.as_object_mut() {
+        obj.insert(
+            "cramp.rules".to_string(),
+            serde_json::Value::String(rule_content.to_string()),
+        );
+    }
+
+    // Write back to settings.json
+    let settings_str = serde_json::to_string_pretty(&settings)
+        .with_context(|| "Failed to serialize VS Code settings")?;
+
+    fs::write(&settings_path, settings_str).with_context(|| "Failed to write VS Code settings")?;
+
+    info!(
+        "Rule content written to VS Code settings: {:?}",
+        settings_path
+    );
     Ok(())
 }

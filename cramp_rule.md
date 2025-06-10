@@ -39,10 +39,10 @@ The system employs sophisticated caching for performance optimization. Understan
 All parameters and return values involving `file_path` are paths relative to the current active project's root directory (e.g., `src/main.rs`, `tests/integration_test.rs`). **ABSOLUTELY NEVER** use absolute paths in tool parameters.
 
 ### 6. **Active Project Context Management**
-All tools except `manage_projects` operate exclusively on the currently **active project**. You must:
-- Ensure an active project is set before using other tools
+All tools operate exclusively on the currently **active project**. You must:
+- Ensure an active project is set before using other tools using `add_server` and `set_active_project`
 - Verify you're operating on the correct project
-- Remember that `manage_projects` clears all caches when switching projects
+- Remember that switching projects clears all caches
 
 ### 7. **Automated Fix Prioritization**
 The sequence `list_diagnostics` → `get_code_actions` → `apply_fix` is the **preferred and optimized** method for code modification. If `get_code_actions` provides a suitable fix (verify description and `diff` preview), you **MUST prioritize** using `apply_fix` over manual client-side edits.
@@ -60,77 +60,69 @@ The sequence `list_diagnostics` → `get_code_actions` → `apply_fix` is the **
 
 ## 🔄 Mandatory Workflow - STRICT ADHERENCE REQUIRED
 
-### Phase 1: Project Initialization & Context Setup
-**Objective**: Establish working context and identify target project
-
-1. **`manage_projects`** - List all available Rust projects and set the active project
-   - **Critical**: This clears all caches when switching projects
-   - **Verification**: Confirm the correct project is now active
-   - **Next**: Proceed only after successful project activation
-
-### Phase 2: Comprehensive Diagnostic Assessment
+### Phase 1: Comprehensive Diagnostic Assessment
 **Objective**: Obtain complete picture of current project health
 
-2. **`list_diagnostics`** - Execute fresh `cargo check` to get current compilation errors/warnings
+1. **`list_diagnostics`** - Execute fresh `cargo check` to get current compilation errors/warnings
    - **Critical**: This invalidates ALL previous `fix_id`s
    - **Analysis**: Review all diagnostics for severity and patterns
    - **Prioritization**: Focus on errors before warnings
    - **Next**: Proceed to investigation if diagnostics exist, or verification if clean
 
-### Phase 3: Strategic Code Investigation (Conditional)
+### Phase 2: Strategic Code Investigation (Conditional)
 **Objective**: Gather necessary context for understanding and fixing issues
 
-3. **`get_file_tree`** - Map project structure and identify key components
+2. **`get_file_tree`** - Map project structure and identify key components
    - **Purpose**: Understand project organization and locate relevant files
    - **Focus**: Pay attention to source directories, test directories, and configuration files
 
-4. **`list_document_symbols`** - Analyze symbols within specific problematic files
+3. **`list_document_symbols`** - Analyze symbols within specific problematic files
    - **Purpose**: Understand file-level structure (functions, structs, implementations)
    - **Strategy**: Target files mentioned in diagnostic messages
 
-5. **`search_workspace_symbols`** - Locate symbols across the entire workspace
+4. **`search_workspace_symbols`** - Locate symbols across the entire workspace
    - **Purpose**: Find definitions, implementations, and usages of problematic symbols
    - **Scope**: Use when diagnostics reference symbols not immediately visible
 
-6. **`get_symbol_info`** - Obtain detailed information about specific symbols
+5. **`get_symbol_info`** - Obtain detailed information about specific symbols
    - **Purpose**: Get precise location, signature, and context of symbols
    - **Precision**: Use exact coordinates from previous symbol searches
 
-### Phase 4: Automated Repair Execution (Preferred Path)
+### Phase 3: Automated Repair Execution (Preferred Path)
 **Objective**: Apply automated fixes when available and suitable
 
-7. **`get_code_actions`** - Query available automatic fixes for specific diagnostics
+6. **`get_code_actions`** - Query available automatic fixes for specific diagnostics
    - **Precision**: Use EXACT `file_path` and `diagnostic_message` from latest `list_diagnostics`
    - **Evaluation**: Review fix descriptions and diff previews carefully
    - **Decision**: Proceed only if fix addresses the root cause appropriately
 
-8. **`apply_fix`** - Execute the selected automatic fix
+7. **`apply_fix`** - Execute the selected automatic fix
    - **Critical**: This invalidates ALL `fix_id`s and diagnostic cache
    - **Immediate Action**: Must run `list_diagnostics` immediately after
    - **Verification**: Confirm the fix was applied successfully
 
-### Phase 5: Manual Repair Implementation (Fallback Path)
+### Phase 4: Manual Repair Implementation (Fallback Path)
 **Objective**: Address issues when automated fixes are unavailable or unsuitable
 
-9. **Manual Code Modification** - Use your environment's file editing capabilities
+8. **Manual Code Modification** - Use your environment's file editing capabilities
    - **Approach**: Apply targeted fixes based on diagnostic analysis and code investigation
    - **Best Practices**: Make minimal, focused changes that address root causes
    - **Documentation**: Consider adding comments explaining complex fixes
 
-10. **`list_diagnostics`** - Mandatory re-check after manual changes
+9. **`list_diagnostics`** - Mandatory re-check after manual changes
     - **Purpose**: Cache invalidation and fresh diagnostic assessment
     - **Critical**: This step is NON-OPTIONAL after any manual edit
     - **Analysis**: Verify manual changes resolved intended issues without introducing new ones
 
-### Phase 6: Comprehensive Verification & Validation
+### Phase 5: Comprehensive Verification & Validation
 **Objective**: Ensure fixes are complete, correct, and don't introduce regressions
 
-11. **`test_project`** - Execute project test suite
+10. **`test_project`** - Execute project test suite
     - **Purpose**: Verify fixes don't break existing functionality
     - **Critical**: This invalidates ALL `fix_id`s and diagnostic cache
     - **Analysis**: Review test results for any new failures or regressions
 
-12. **`list_diagnostics`** - Final diagnostic verification
+11. **`list_diagnostics`** - Final diagnostic verification
     - **Purpose**: Confirm all targeted issues are resolved
     - **Success Criteria**: Zero errors, minimal warnings
     - **Completion**: Project is ready for use when diagnostics are clean
@@ -155,79 +147,69 @@ As an LLM agent working with CRAMP, your mission is to:
 
 **Remember**: CRAMP is designed to make Rust development more efficient and reliable. By following these rules strictly, you become a powerful ally in maintaining code quality and resolving issues systematically.
 
-**Your workflow mantra**: `Setup` → `Diagnose` → `Investigate/Act` → `Verify` → `Loop/Complete`
+**Your workflow mantra**: `Diagnose` → `Investigate/Act` → `Verify` → `Loop/Complete`
 
 ```mermaid
 graph TD
-    Start --> 1-Manage["1. manage_projects (Get Snapshot)"];
+    Start --> 1-ListDiag["1. list_diagnostics"];
      subgraph Cycle
      subgraph Diagnose
-    2-ListDiag["2. list_diagnostics"];
+    1-ListDiag["1. list_diagnostics"];
 	end
-    1-Manage -- "Load/Set Active" --> 2-ListDiag;
-    2-ListDiag -- "No Errors/Warnings" --> 6-Test;
-    2-ListDiag -- "Has Errors/Warnings" --> 3-GetActions["3. get_code_actions<br>(for a specific diagnostic)"];
+    1-ListDiag -- "No Errors/Warnings" --> 4-Test;
+    1-ListDiag -- "Has Errors/Warnings" --> 2-GetActions["2. get_code_actions<br>(for a specific diagnostic)"];
 
-    3-GetActions --> 4-AutoFix{Has suitable<br>auto-fix (fix_id & diff)?};
+    2-GetActions --> 3-AutoFix{Has suitable<br>auto-fix (fix_id & diff)?};
 
-    4-AutoFix -- "Yes" --> 4a-Apply["4a. apply_fix(fix_id)"];
-	4a-Apply -- "Invalidates ALL Fixes & Diags" --> RerunList[Go Back to 2-ListDiag];
+    3-AutoFix -- "Yes" --> 3a-Apply["3a. apply_fix(fix_id)"];
+	3a-Apply -- "Invalidates ALL Fixes & Diags" --> RerunList[Go Back to 1-ListDiag];
 
-    4-AutoFix -- "No / Need Info" --> 5-ManualCycle;
+    3-AutoFix -- "No / Need Info" --> 4-ManualCycle;
 
-     subgraph 5-ManualCycle [5. Investigation & Manual Fix]
+     subgraph 4-ManualCycle [4. Investigation & Manual Fix]
          direction TB
-		  5a-Info["get_symbol_info (API details)"]
-		  5b-Symbols["list_document_symbols / search_workspace_symbols"]
-          5c-Tree["get_file_tree (if needed)"]
-          5d-Read["CLIENT: Read File Content"]
-          5e-Write["CLIENT: Apply Manual Edit"]
-          5a-Info --> 5b-Symbols
-		  5b-Symbols --> 5c-Tree
-		  5c-Tree --> 5d-Read
-		  5d-Read --> 5e-Write
+		  3a-Info["get_symbol_info (API details)"]
+		  3b-Symbols["list_document_symbols / search_workspace_symbols"]
+          3c-Tree["get_file_tree (if needed)"]
+          3d-Read["CLIENT: Read File Content"]
+          3e-Write["CLIENT: Apply Manual Edit"]
+          3a-Info --> 3b-Symbols
+		  3b-Symbols --> 3c-Tree
+		  3c-Tree --> 3d-Read
+		  3d-Read --> 3e-Write
      end
 
-    5-ManualCycle -- "AFTER Client Write (State is Stale)" --> RerunList;
-	5-ManualCycle -- "Info gathering only (No Write)" --> 3-GetActions;
+    4-ManualCycle -- "AFTER Client Write (State is Stale)" --> RerunList;
+	4-ManualCycle -- "Info gathering only (No Write)" --> 2-GetActions;
 
     subgraph Verify
-    6-Test["6. test_project"];
+    5-Test["5. test_project"];
 	end
-    6-Test -- "Tests PASS" --> END(Task Complete);
-    6-Test -- "Tests FAIL (Invalidates ALL Fixes & Diags)" --> Analyze[Analyze test output];
-    Analyze --> 5-ManualCycle;
+    5-Test -- "Tests PASS" --> END(Task Complete);
+    5-Test -- "Tests FAIL (Invalidates ALL Fixes & Diags)" --> Analyze[Analyze test output];
+    Analyze --> 4-ManualCycle;
     end
 
     %% Styling
      classDef critical fill:#f9f,stroke:#333,stroke-width:2px;
 	 classDef client fill:#ccf,stroke:#333,stroke-width:1px;
-     class 2-ListDiag,RerunList,4a-Apply,6-Test critical
-	 class 5d-Read,5e-Write client
+     class 1-ListDiag,RerunList,3a-Apply,5-Test critical
+	 class 3d-Read,3e-Write client
 
 ```
 
-1.  🏁 **Setup: `manage_projects`**
-    *   **Purpose**: Load a project, set the active project context, remove projects.
-    *   **Output**: Text report including: workspace status, initial file tree snapshot, initial diagnostic summary, and "Next Step" guidance.
-    *   **Rules**:
-        *   **MUST** often be your first tool call.
-        *   Use `project_path_or_name` with a filesystem path to load and activate.
-        *   If a project is already loaded, provide its name to switch the active context (this also clears cache and provides a fresh snapshot).
-        *   Check the returned status report to confirm the active project and review the initial snapshot.
-
-2.  🧠 **Diagnose: `list_diagnostics`**
+1.  🧠 **Diagnose: `list_diagnostics`**
     *   **Purpose**: Run `cargo check` to get all project compilation errors and warnings. Populates the cache that `get_code_actions` reads from.
     *    **Output**: JSON list of diagnostics (`SimpleDiagnostic`) and "Next Step" guidance.
     *   **Rules**:
-        *   Call after setting the active project (although `manage_projects` gives an initial summary).
+        *   Call after setting the active project.
         *   **MUST** be called *before* calling `get_code_actions`.
         *   **MUST** be re-called after *any* code modification (`apply_fix` or manual client-side edit) or after `test_project`.
         *   **Side-effect**: Invalidates all previously known `fix_id`s.
         *   Parse the JSON: Focus on `severity`, `message`, `file_path`, `line` (**0-based!**), `character` (**0-based!**).
         *   If the return indicates no errors, proceed to the **Verify** step (`test_project`).
 
-3. **Find Fix: `get_code_actions`**
+2. **Find Fix: `get_code_actions`**
      *   **Purpose**: Find available automatic fixes for *one specific* diagnostic found by `list_diagnostics`.
      *   **Output**: JSON list of actions (`ActionWithId`), each with `id`, `description`, and `diff` preview, plus "Next Step" guidance.
      *    **Rules**:
@@ -237,29 +219,29 @@ graph TD
          *   If suitable, record the `id` for use with `apply_fix`.
          *   If no suitable fixes, proceed to Step 5 (Investigation & Manual Fix).
 
-4.  🛠️ **Act (Auto): `apply_fix`**
+3.  🛠️ **Act (Auto): `apply_fix`**
     *   **Purpose**: Apply an automatic fix identified by `get_code_actions`. Modifies files on disk.
     *   **Output**: Success message and "Next Step" guidance.
     *   **Priority**: High! If a suitable `fix_id` exists, you **MUST** prioritize using this tool over manual edits.
     *   **Rules**:
         *   The `fix_id` parameter **MUST** come from the result of `get_code_actions` called after the *most recent* `list_diagnostics`.
         *   **Side-effect**: Calling this tool invalidates all `fix_id`s AND the diagnostic cache.
-        *   Upon success, you **MUST** return to step 2 (`list_diagnostics`).
+        *   Upon success, you **MUST** return to step 1 (`list_diagnostics`).
 
-5.  ✍️ **Act (Investigation & Manual): Explore & Edit**
+4.  ✍️ **Act (Investigation & Manual): Explore & Edit**
     *    **Purpose**: Manually understand and modify code when no suitable auto-fix is available, or when tests fail.
     *    **Priority**: Lower than `apply_fix`.
     *    **Sub-steps & Tools**:
         *   **`get_symbol_info`**: Get API details (docs, signature, definition structure, methods, fields) for the code symbol. Provide `file_path` AND EITHER `line`/`character` (0-based) OR `symbol_name`. Output is Markdown.
 		*   **`list_document_symbols`**: Get JSON list of symbols (structs, funcs, etc.) in a `file_path`. Locations are **0-based**.
 		*   **`search_workspace_symbols`**: Find symbols matching `query` across the project. JSON list, locations are **0-based**.
-        *   **`get_file_tree`**: Get text tree if the one from `manage_projects` is stale or insufficient.
+        *   **`get_file_tree`**: Get text tree to understand project structure.
         *    **CLIENT-SIDE: Read File Content**: Use your environment's capability to read code from `file_path` (relative) based on information from diagnostics or symbol tools.
         *    **CLIENT-SIDE: Apply Manual Edit**: Use your environment's capability to write/modify code.
             *   **Side-effect**: Makes server state (cache, LSP VFS) stale.
-            *   Upon performing a client-side write, you **MUST** return to step 2 (`list_diagnostics`).
+            *   Upon performing a client-side write, you **MUST** return to step 1 (`list_diagnostics`).
 
-6.  ✅ **Verify: `test_project`**
+5.  ✅ **Verify: `test_project`**
     *   **Purpose**: Run `cargo test` for final confirmation.
     *   **Output**: Raw `cargo test` output (stdout/stderr) and "Next Step" guidance.
     *   **Rules**:
@@ -267,20 +249,15 @@ graph TD
         *   Call this tool when `list_diagnostics` reports no errors or warnings.
         *   Carefully analyze the output:
             *   If all tests pass, the task is likely complete.
-            *   If tests fail, analyze the failure information (which test, reason), then return to step 5 (Investigation & Manual Fix).
+            *   If tests fail, analyze the failure information (which test, reason), then return to step 4 (Investigation & Manual Fix).
             * You can use the `test_name` parameter to run only a specific failing test, speeding up iteration.
 
-7.  🎉 **Complete**:
+6.  🎉 **Complete**:
      *  The task is considered complete if and only if `list_diagnostics` reports no errors AND `test_project` reports all tests passed.
 
 ---
 ## 🔧 Tool Detail Rules
 
-*   **`manage_projects(project_path_or_name: Option<String>, remove_project_name: Option<String>)`**
-    *   Always the first step.
-    *   `project_path_or_name`: Path loads+activates; existing name only activates.
-    *   `remove_project_name`: Removes project, shuts down its language server, clears cache.
-    *   Returns initial snapshot (tree, diagnostics) and status (Text).
 *   **`list_diagnostics(file_path: Option<String>, limit: Option<u32>)`**
     *   **Diagnostic Hub**. Runs `cargo check`.
     *   Output `line` and `column` are **0-based** (JSON).
@@ -323,8 +300,8 @@ graph TD
     *   **Avoid**: Always follow the loop: ensure `fix_id` comes from `get_code_actions` called *immediately* after the *most recent* `list_diagnostics`, with no intervening invalidating operations. After `apply_fix` or manual edit, you MUST re-run `list_diagnostics`.
 *   **Pitfall 2**: Calling `get_symbol_info` or interpreting JSON output using 1-based line/character numbers.
     *   **Avoid**: Always remember the interface is **0-based**.
-*   **Pitfall 3**: Calling tools (except `manage_projects`) without an active project set.
-    *   **Avoid**: Ensure `manage_projects` is run first and successfully sets an active project. Check its output.
+*   **Pitfall 3**: Calling tools when no active project is available.
+    *   **Avoid**: Ensure the system has an active project context before using CRAMP tools. This is typically handled by the client/server setup.
 *    **Pitfall 4**: `get_code_actions` provides a perfect auto-fix, but the Agent chooses the inefficient manual path (Client-Side Read -> Client-Side Write).
      *   **Avoid**: **Always** check `get_code_actions` description and `diff` first; prioritize using `apply_fix`.
 *   **Pitfall 5**: Ignoring the "Next Step" guidance returned by the tools.

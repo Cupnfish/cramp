@@ -69,15 +69,13 @@ pub struct RaServer {
     progress_tokens: ProgressTokens,
     request_id: AtomicU64,
     join_handles: Arc<RwLock<Vec<JoinHandle<()>>>>,
-    is_initialized: Arc<Notify>,
-    initial_indexing_done: Arc<Notify>,
     is_shutting_down: Arc<RwLock<bool>>,
+    initial_indexing_done: Arc<Notify>,
     request_timeout: Duration,
     shutdown_timeout: Duration,
 }
 
 impl RaServer {
-    #[allow(deprecated)] // Allow using root_uri
     pub async fn start_with_timeouts(
         project_root: &Path,
         project_name: String,
@@ -142,17 +140,18 @@ impl RaServer {
             progress_tokens,
             request_id: AtomicU64::new(1),
             join_handles: Arc::new(RwLock::new(handles)),
-            is_initialized: is_initialized.clone(),
-            initial_indexing_done: initial_indexing_done.clone(),
             is_shutting_down: Arc::new(RwLock::new(false)),
+            initial_indexing_done: initial_indexing_done.clone(),
             request_timeout,
             shutdown_timeout,
         });
 
         let init_params = InitializeParams {
             process_id: Some(std::process::id()),
-            root_uri: Some(url_to_lsp_uri(&root_uri)),
-            root_path: Some(root_path.to_string_lossy().into_owned()),
+            #[allow(deprecated)]
+            root_uri: None,
+            #[allow(deprecated)]
+            root_path: None,
             capabilities: lsp::ClientCapabilities {
                 workspace: Some(WorkspaceClientCapabilities {
                     apply_edit: Some(true),
@@ -260,7 +259,7 @@ impl RaServer {
             trace: Some(lsp::TraceValue::Verbose), // Get more info
             client_info: Some(lsp::ClientInfo {
                 name: "cramp-lsp".into(),
-                version: Some("0.1.0".into()),
+                version: Some(env!("CARGO_PKG_VERSION").into()),
             }),
             locale: None,
         };
@@ -283,8 +282,6 @@ impl RaServer {
             Ok(Err(e)) => return Err(RaError::OneshotRecv(e)),
             Err(_) => return Err(RaError::Timeout(request_timeout, init_id)),
         }
-        // Wait for reader loop to process the response and notify
-        server.is_initialized.notified().await;
 
         server
             .send_notification::<Initialized>(InitializedParams {})
@@ -294,20 +291,7 @@ impl RaServer {
             project_name,
             initial_wait // Log the wait time
         );
-        // *** PERFORMANCE: Allow more time for initial indexing ***
-        // Wait for the initial_indexing_done notification, or timeout
-        let wait_start = Instant::now();
-        match tokio::time::timeout(initial_wait, server.initial_indexing_done.notified()).await {
-            Ok(_) => info!(
-                "[{}] Initial indexing reported complete in {:.2?}.",
-                project_name,
-                wait_start.elapsed()
-            ),
-            Err(_) => warn!(
-                "[{}] Timeout ({:?}) waiting for initial indexing completion signal. Proceeding anyway.",
-                project_name, initial_wait
-            ),
-        }
+
         // Clear tokens after initial wait
         server.progress_tokens.clear();
 
@@ -317,10 +301,12 @@ impl RaServer {
         Ok(server)
     }
 
-    pub async fn wait_ready(&self) {
-        self.is_initialized.notified().await;
-        // Wait again in case notified() was called before the timeout in start() finished
+    /// Wait for initial indexing to complete
+    pub async fn wait_for_indexing_complete(&self) -> Result<()> {
+        info!("[{}] Waiting for initial indexing to complete...", self.project_name);
         self.initial_indexing_done.notified().await;
+        info!("[{}] Initial indexing completed, ready to serve requests.", self.project_name);
+        Ok(())
     }
 
     pub async fn shutdown(&self) -> Result<()> {
@@ -341,7 +327,7 @@ impl RaServer {
                 // match self.send_request_internal::<Shutdown>(()).await {
                 // Check writer_tx is not closed before sending
                 if !self.writer_tx.is_closed() {
-                    match self.send_request_internal_no_wait::<Shutdown>(()).await {
+                    match self.send_request_internal::<Shutdown>(()).await {
                         Ok(_) => debug!("[{}] Shutdown request accepted.", self.project_name),
                         Err(e) => warn!("[{}] Shutdown request failed: {:?}", self.project_name, e),
                     }
@@ -395,10 +381,7 @@ impl RaServer {
         Ok(())
     }
 
-    async fn send_request_internal_no_wait<R: Request>(
-        &self,
-        params: R::Params,
-    ) -> Result<R::Result>
+    async fn send_request_internal<R: Request>(&self, params: R::Params) -> Result<R::Result>
     where
         R::Params: Serialize,
         R::Result: DeserializeOwned,
@@ -438,20 +421,6 @@ impl RaServer {
                 Err(RaError::Timeout(timeout_duration, id))
             }
         }
-    }
-
-    async fn send_request_internal<R: Request>(&self, params: R::Params) -> Result<R::Result>
-    where
-        R::Params: Serialize,
-        R::Result: DeserializeOwned,
-    {
-        if R::METHOD != Shutdown::METHOD && R::METHOD != Initialize::METHOD {
-            // Use a timeout for waiting, in case the notify is missed
-            tokio::time::timeout(self.request_timeout, self.wait_ready())
-                .await
-                .map_err(|_| RaError::ServerNotInitialized)?;
-        }
-        self.send_request_internal_no_wait::<R>(params).await
     }
 
     async fn send_notification<N: Notification>(&self, params: N::Params) -> Result<()>
