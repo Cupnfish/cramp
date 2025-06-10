@@ -41,6 +41,4 @@ serde_json = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 arboard = { workspace = true }
 crossterm = { workspace = true, features = ["events"] }
-comrak = { workspace = true }
-syntect = { workspace = true }
 scopeguard = { workspace = true }

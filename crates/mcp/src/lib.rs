@@ -42,23 +42,18 @@ struct ListDocumentSymbolsRequest {
     file_path: String,
 }
 
-// *** USABILITY: Redesign GetSymbolInfoRequest ***
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GetSymbolInfoRequest {
     #[schemars(description = "Relative path to the file containing the symbol.")]
     file_path: String,
     #[schemars(
-        description = "0-based line number of the symbol (optional if symbol_name is provided)."
+        description = "Line number of the symbol, use values from search_workspace_symbols or list_document_symbols."
     )]
-    line: Option<u32>,
+    line: u32,
     #[schemars(
-        description = "0-based character number of the symbol (optional if symbol_name is provided)."
+        description = "Character position of the symbol, use values from search_workspace_symbols or list_document_symbols."
     )]
-    character: Option<u32>,
-    #[schemars(
-        description = "Name of the symbol to find within the file (optional if line/character are provided)."
-    )]
-    symbol_name: Option<String>,
+    character: u32,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -137,7 +132,7 @@ impl McpToolboxService {
 #[tool(tool_box)]
 impl McpToolboxService {
     #[tool(
-        description = "Executes `cargo check` on the active Rust project to detect compilation errors and warnings. Returns a comprehensive JSON list of diagnostics with file paths, line/character positions (0-based), severity levels, and detailed error messages. Supports optional filtering by specific file path and result limiting. This tool must be run before `get_code_actions` to populate the diagnostic cache. Invalidates all previously cached fix IDs when executed."
+        description = "Executes `cargo check` on the active Rust project to detect compilation errors and warnings. Returns a comprehensive JSON list of diagnostics with file paths, line/character positions, severity levels, and detailed error messages. Supports optional filtering by specific file path and result limiting. This tool must be run before `get_code_actions` to populate the diagnostic cache. Invalidates all previously cached fix IDs when executed."
     )]
     async fn list_diagnostics(
         &self,
@@ -175,7 +170,7 @@ impl McpToolboxService {
     }
 
     #[tool(
-        description = "Analyzes and lists all high-level code symbols (structs, functions, traits, enums, modules, etc.) found in the specified Rust source file. Returns a detailed JSON list containing symbol names, types, locations with 0-based line/character positions, and hierarchical relationships. Essential for code navigation and understanding file structure before making modifications."
+        description = "Analyzes and lists all high-level code symbols (structs, functions, traits, enums, modules, etc.) found in the specified Rust source file. Returns a detailed JSON list containing symbol names, types, locations with line/character positions, and hierarchical relationships. Essential for code navigation and understanding file structure before making modifications."
     )]
     async fn list_document_symbols(
         &self,
@@ -185,7 +180,7 @@ impl McpToolboxService {
     }
 
     #[tool(
-        description = "Provides comprehensive information about a specific code symbol including documentation, function signatures, struct/enum definitions, available methods, fields, and implementation details. Requires file_path AND EITHER precise line/character coordinates (0-based) OR symbol_name for lookup. Returns rich markdown-formatted documentation ideal for understanding APIs and code structure before modification."
+        description = "Provides comprehensive information about a specific code symbol including documentation, function signatures, struct/enum definitions, available methods, fields, and implementation details. Requires file_path and precise line/character coordinates from search_workspace_symbols or list_document_symbols. Returns rich markdown-formatted documentation ideal for understanding APIs and code structure before modification."
     )]
     async fn get_symbol_info(
         &self,
@@ -193,13 +188,13 @@ impl McpToolboxService {
     ) -> Result<CallToolResult, McpError> {
         to_mcp_result(|| {
             self.toolbox
-                .get_symbol_info(req.file_path, req.line, req.character, req.symbol_name)
+                .get_symbol_info(req.file_path, req.line, req.character)
         })
         .await
     }
 
     #[tool(
-        description = "Performs a comprehensive search across the entire active Rust project workspace for symbols (functions, structs, traits, etc.) matching the provided query string. Uses fuzzy matching to find relevant symbols even with partial names. Returns a JSON list of matching symbols with their locations (0-based line/character), file paths, and symbol types. Ideal for discovering APIs and understanding codebase structure."
+        description = "Performs a comprehensive search across the entire active Rust project workspace for symbols (functions, structs, traits, etc.) matching the provided query string. Uses fuzzy matching to find relevant symbols even with partial names. Returns a JSON list of matching symbols with their locations (line/character), file paths, and symbol types. Ideal for discovering APIs and understanding codebase structure."
     )]
     async fn search_workspace_symbols(
         &self,
@@ -240,7 +235,7 @@ This server provides specialized tools for intelligent interaction with Rust pro
 - **`test_project`**: Run the project's test suite
 
 ## Core Principles
-- **0-Based Indexing**: All line and character numbers are 0-based throughout the system
+- **Coordinate System**: Line and character positions are provided by symbol search tools
 - **Relative Paths**: All file paths are relative to the active project root directory
 - **Cache Management**: Critical state invalidation rules must be followed for correct operation
 - **Client I/O Responsibility**: Your environment handles file reading/writing (except `apply_fix`)
@@ -259,7 +254,7 @@ This server provides specialized tools for intelligent interaction with Rust pro
 - **`search_workspace_symbols`**: Find symbols across entire project with fuzzy matching
   - Requires: `query` (search term)
 - **`get_symbol_info`**: Get detailed API documentation and signatures (Markdown output)
-  - Requires: `file_path` AND EITHER `line`/`character` (0-based) OR `symbol_name`
+  - Requires: `file_path` and `line`/`character` coordinates from search_workspace_symbols or list_document_symbols
 - **Client-side file reading**: Use your environment to read source code content
 
 ### Automated Repair
@@ -313,9 +308,8 @@ This server provides specialized tools for intelligent interaction with Rust pro
 
 ### get_symbol_info
 - `file_path` (required): Relative path to file containing symbol
-- `line` (optional): 0-based line number
-- `character` (optional): 0-based character number
-- `symbol_name` (optional): Name of symbol to find
+- `line` (required): Line number from search_workspace_symbols or list_document_symbols
+- `character` (required): Character position from search_workspace_symbols or list_document_symbols
 
 ### search_workspace_symbols
 - `query` (required): Search term for symbol names

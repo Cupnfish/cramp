@@ -16,11 +16,10 @@ lsp-types.workspace = true
 url.workspace = true
 
 log.workspace = true
-env_logger.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 
-dashmap = { workspace = true, features = ["rayon"] }                                   # Concurrent HashMap
+dashmap = { workspace = true, features = ["rayon"] }       # Concurrent HashMap
 once_cell.workspace = true
 uuid = { workspace = true, features = ["v4", "fast-rng"] } # For Fix IDs
 
@@ -32,11 +31,10 @@ pathdiff.workspace = true   # Relative paths
 cargo_metadata.workspace = true # Updated version
 
 # FS utils
-ignore.workspace = true                               # File tree with .gitignore respect
 similar = { workspace = true, features = ["inline"] } # Diff generation
 
 itertools.workspace = true
 
-bytes.workspace = true # For codec
-rayon.workspace = true # For CPU parallelism
+bytes.workspace = true  # For codec
+rayon.workspace = true  # For CPU parallelism
 strsim.workspace = true # For fuzzy string matching

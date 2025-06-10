@@ -283,7 +283,7 @@ async fn run_server(transport: TransportCommand) -> Result<()> {
         error!("Failed to wait for indexing completion: {}", e);
         return Err(e.into());
     }
-    
+
     info!("Project initialized successfully");
 
     let shutdown_token = CancellationToken::new();

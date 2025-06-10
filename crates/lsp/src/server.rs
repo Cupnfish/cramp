@@ -303,9 +303,15 @@ impl RaServer {
 
     /// Wait for initial indexing to complete
     pub async fn wait_for_indexing_complete(&self) -> Result<()> {
-        info!("[{}] Waiting for initial indexing to complete...", self.project_name);
+        info!(
+            "[{}] Waiting for initial indexing to complete...",
+            self.project_name
+        );
         self.initial_indexing_done.notified().await;
-        info!("[{}] Initial indexing completed, ready to serve requests.", self.project_name);
+        info!(
+            "[{}] Initial indexing completed, ready to serve requests.",
+            self.project_name
+        );
         Ok(())
     }
 

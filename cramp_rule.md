@@ -2,7 +2,7 @@
 
 **Primary Objective**: To provide comprehensive guidance for LLM agents in the precise, efficient, and reliable use of the CRAMP (Cargo Rust Analysis & Management Platform) toolset for analyzing, diagnosing, fixing, and verifying Rust project tasks. Strict adherence to these rules and workflows is **MANDATORY** for successful operation.
 
-**Fundamental Principles**: 
+**Fundamental Principles**:
 - **Trust Tool Output**: Always rely on tool responses as authoritative sources of information
 - **Follow Prescribed Workflow**: Execute the standardized workflow without deviation or shortcuts
 - **State Management Vigilance**: Pay critical attention to active project context and cache/ID invalidation mechanisms
@@ -30,10 +30,10 @@ The system employs sophisticated caching for performance optimization. Understan
 
 **Critical Prohibition**: **NEVER** attempt to use a `fix_id` after any invalidating operation (`list_diagnostics`, `apply_fix`, `test_project`, or manual client-side edit).
 
-### 4. **0-Based Indexing System (CRITICAL!)**
-- **Input**: All line/character number parameters you provide to tools (`get_symbol_info`) **MUST** be **0-based**
-- **Output**: All line/character numbers returned in JSON by tools (`list_diagnostics`, `list_document_symbols`, `search_workspace_symbols`) are **0-based**
-- **Consistency**: Maintain 0-based indexing throughout all operations to prevent off-by-one errors
+### 4. **Coordinate System (CRITICAL!)**
+- **Input**: All line/character number parameters you provide to tools (`get_symbol_info`) should use coordinates from symbol search tools
+- **Output**: All line/character numbers returned in JSON by tools (`list_diagnostics`, `list_document_symbols`, `search_workspace_symbols`) follow the system's standard format
+- **Consistency**: Use coordinates directly from search results to prevent positioning errors
 
 ### 5. **Relative Path Convention**
 All parameters and return values involving `file_path` are paths relative to the current active project's root directory (e.g., `src/main.rs`, `tests/integration_test.rs`). **ABSOLUTELY NEVER** use absolute paths in tool parameters.
@@ -201,7 +201,7 @@ graph TD
         *   **MUST** be called *before* calling `get_code_actions`.
         *   **MUST** be re-called after *any* code modification (`apply_fix` or manual client-side edit) or after `test_project`.
         *   **Side-effect**: Invalidates all previously known `fix_id`s.
-        *   Parse the JSON: Focus on `severity`, `message`, `file_path`, `line` (**0-based!**), `character` (**0-based!**).
+        *   Parse the JSON: Focus on `severity`, `message`, `file_path`, `line`, `character`.
         *   If the return indicates no errors, proceed to the **Verify** step (`test_project`).
 
 2. **Find Fix: `get_code_actions`**
@@ -227,9 +227,9 @@ graph TD
     *    **Purpose**: Manually understand and modify code when no suitable auto-fix is available, or when tests fail.
     *    **Priority**: Lower than `apply_fix`.
     *    **Sub-steps & Tools**:
-        *   **`get_symbol_info`**: Get API details (docs, signature, definition structure, methods, fields) for the code symbol. Provide `file_path` AND EITHER `line`/`character` (0-based) OR `symbol_name`. Output is Markdown.
-		*   **`list_document_symbols`**: Get JSON list of symbols (structs, funcs, etc.) in a `file_path`. Locations are **0-based**.
-		*   **`search_workspace_symbols`**: Find symbols matching `query` across the project. JSON list, locations are **0-based**.
+    *   **`get_symbol_info`**: Get API details (docs, signature, definition structure, methods, fields) for the code symbol. Provide `file_path` and `line`/`character` coordinates from search_workspace_symbols or list_document_symbols. Output is Markdown.
+    *   **`list_document_symbols`**: Get JSON list of symbols (structs, funcs, etc.) in a `file_path`.
+    *   **`search_workspace_symbols`**: Find symbols matching `query` across the project. JSON list.
         *    **CLIENT-SIDE: Read File Content**: Use your environment's capability to read code from `file_path` (relative) based on information from diagnostics or symbol tools.
         *    **CLIENT-SIDE: Apply Manual Edit**: Use your environment's capability to write/modify code.
             *   **Side-effect**: Makes server state (cache, LSP VFS) stale.
@@ -254,35 +254,35 @@ graph TD
 
 *   **`list_diagnostics(file_path: Option<String>, limit: Option<u32>)`**
     *   **Diagnostic Hub**. Runs `cargo check`.
-    *   Output `line` and `column` are **0-based** (JSON).
+    *   Output `line` and `column` positions are in JSON format.
     *   **Invalidates all previous `fix_id`s**.
     *   Must run before `get_code_actions`. Must re-run after any code change.
 *    **`get_code_actions(file_path: String, diagnostic_message: String)`**
      *   Requires `file_path` and `diagnostic_message` **exactly** as returned by the most recent `list_diagnostics`.
      *   Output includes `id` and `diff` preview (JSON).
-*   **`apply_fix(fix_id: String)`**
-     *   `fix_id` **MUST** be from `get_code_actions` run after the most recent `list_diagnostics`.
-     *   Modifies files on disk and notifies the internal LSP server.
-     *   **Invalidates ALL `fix_id`s AND the diagnostic cache**.
-     *   MUST re-run `list_diagnostics` after calling.
-*   **`list_document_symbols(file_path: String)`**
-     *   Exploration. `file_path` is relative.
-     *   Output `line` and `character` are **0-based** (JSON).
-*     **`get_symbol_info(file_path: String, line: Option<u32>, character: Option<u32>, symbol_name: Option<String>)`**
-      *  API details.
-      *  `file_path` is relative. Provide `file_path` AND EITHER `line`/`character` (0-based) OR `symbol_name`.
-      *  Output is Markdown summary of docs, fields, methods etc.
-*    **`search_workspace_symbols(query: String)`**
-      * Exploration.
-      * Output `line` and `character` are **0-based** (JSON).
-*   **`test_project(test_name: Option<String>)`**
-    *   Verification.
-    *   Output is raw `cargo test` text. Carefully analyze success/failure messages.
-     *   **Invalidates ALL `fix_id`s AND the diagnostic cache**.
-    *   On failure, return to the manual fix cycle based on the output.
-*   **CLIENT-SIDE I/O**
-     * Not a CRAMP tool. Used for reading content and applying edits when `apply_fix` is not applicable.
-	 * Any client-side *write* requires a follow-up call to `list_diagnostics`.
+     *   **`apply_fix(fix_id: String)`**
+          *   `fix_id` **MUST** be from `get_code_actions` run after the most recent `list_diagnostics`.
+          *   Modifies files on disk and notifies the internal LSP server.
+          *   **Invalidates ALL `fix_id`s AND the diagnostic cache**.
+          *   MUST re-run `list_diagnostics` after calling.
+     *   **`list_document_symbols(file_path: String)`**
+          *   Exploration. `file_path` is relative.
+          *   Output `line` and `character` positions are in JSON format.
+     *     **`get_symbol_info(file_path: String, line: u32, character: u32)`**
+           *  API details.
+           *  `file_path` is relative. Provide `file_path` and `line`/`character` coordinates from search_workspace_symbols or list_document_symbols.
+           *  Output is Markdown summary of docs, fields, methods etc.
+     *    **`search_workspace_symbols(query: String)`**
+           * Exploration.
+           * Output `line` and `character` positions are in JSON format.
+     *   **`test_project(test_name: Option<String>)`**
+         *   Verification.
+         *   Output is raw `cargo test` text. Carefully analyze success/failure messages.
+          *   **Invalidates ALL `fix_id`s AND the diagnostic cache**.
+         *   On failure, return to the manual fix cycle based on the output.
+     *   **CLIENT-SIDE I/O**
+          * Not a CRAMP tool. Used for reading content and applying edits when `apply_fix` is not applicable.
+       * Any client-side *write* requires a follow-up call to `list_diagnostics`.
 
 ---
 ## 🚫 CRITICAL PITFALLS & Avoidance Strategies
@@ -290,8 +290,8 @@ graph TD
 *   **Pitfall 1**: Attempting to use a `fix_id` after it has been invalidated.
     *   **Invalidators**: `list_diagnostics`, `apply_fix`, `test_project`, any manual client-side edit.
     *   **Avoid**: Always follow the loop: ensure `fix_id` comes from `get_code_actions` called *immediately* after the *most recent* `list_diagnostics`, with no intervening invalidating operations. After `apply_fix` or manual edit, you MUST re-run `list_diagnostics`.
-*   **Pitfall 2**: Calling `get_symbol_info` or interpreting JSON output using 1-based line/character numbers.
-    *   **Avoid**: Always remember the interface is **0-based**.
+    *   **Pitfall 2**: Calling `get_symbol_info` with incorrect line/character coordinates.
+        *   **Avoid**: Always use coordinates directly from search_workspace_symbols or list_document_symbols results.
 *   **Pitfall 3**: Calling tools when no active project is available.
     *   **Avoid**: Ensure the system has an active project context before using CRAMP tools. This is typically handled by the client/server setup.
 *    **Pitfall 4**: `get_code_actions` provides a perfect auto-fix, but the Agent chooses the inefficient manual path (Client-Side Read -> Client-Side Write).

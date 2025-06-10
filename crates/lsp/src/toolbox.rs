@@ -7,14 +7,12 @@ use dashmap::DashMap;
 
 use log::{debug, error, info, warn};
 // *** Add find_symbol_by_name_in_hierarchy import
-use lsp_types::{
-    DocumentSymbol, Location, OneOf, Range, SymbolInformation, WorkspaceSymbolResponse,
-};
+use lsp_types::{Location, OneOf, Range, SymbolInformation, WorkspaceSymbolResponse};
 use path_clean::PathClean;
 use pathdiff::diff_paths;
-use rayon::iter::IndexedParallelIterator as _;
 use rayon::iter::IntoParallelRefIterator as _;
 use rayon::iter::ParallelIterator as _;
+use rayon::iter::{IndexedParallelIterator as _, IntoParallelIterator};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use strsim::jaro_winkler;
@@ -105,7 +103,9 @@ impl Toolbox {
     pub async fn wait_for_indexing_complete(&self) -> ToolResult<()> {
         let server = self.server.read().await;
         if let Some(server) = server.as_ref() {
-            server.wait_for_indexing_complete().await
+            server
+                .wait_for_indexing_complete()
+                .await
                 .map_err(ToolboxError::ServerError)?;
             Ok(())
         } else {
@@ -244,7 +244,6 @@ impl Toolbox {
         // Clear fixes, as new diagnostics invalidate old fixes
         self.clear_all_cache_for_project(name);
 
-        // <<< PERFORMANCE: MUST use spawn_blocking for external process
         let diags_0based: Vec<MyDiagnostic> =
             spawn_blocking(move || server.get_cargo_check_diagnostics())
                 .await
@@ -622,7 +621,6 @@ Next Step: {}",
         ))
     }
 
-
     // --- list_document_symbols ---
     pub async fn list_document_symbols(&self, file_path: String) -> ToolResult<String> {
         let (name, server) = self.get_active_server().await?;
@@ -655,10 +653,35 @@ Next Step: {}",
         })
         .await
         .map_err(ToolboxError::TaskJoin)?;
+        // Group symbols by kind and then sort by line and character
+        use std::collections::BTreeMap;
+        let mut grouped_symbols: BTreeMap<String, Vec<(&str, u32, u32)>> = BTreeMap::new();
 
-        let json_output = serde_json::to_string_pretty(&flat_symbols)?;
+        for sym in &flat_symbols {
+            grouped_symbols.entry(sym.kind.clone()).or_default().push((
+                &sym.name,
+                sym.line + 1,
+                sym.character + 1,
+            ));
+        }
+
+        // Build output string grouped by kind
+        let mut output_str = format!("Symbols in file: {}\n", flat_symbols[0].file_path);
+        for (kind, symbols) in grouped_symbols {
+            // Sort symbols by line then character
+            let mut sorted_symbols = symbols;
+            sorted_symbols.sort_by_key(|(_, line, char)| (*line, *char));
+
+            output_str.push_str(&format!("\nKind: {}\n", kind));
+            for (name, line, char) in sorted_symbols {
+                output_str.push_str(&format!("  {}: ({}, {})\n", name, line, char));
+            }
+        }
+
+        output_str.push_str("\nNote: Numbers in parentheses are (line, character).\n");
+
         let guidance = "Review the symbols. Next: Use `get_symbol_info` with file_path and EITHER line/character OR symbol_name to get details.";
-        Ok(format!("{}\n\n---\nNext Step: {}", json_output, guidance))
+        Ok(format!("{}\n\n---\nNext Step: {}", output_str, guidance))
     }
 
     // --- get_symbol_info ---
@@ -666,80 +689,15 @@ Next Step: {}",
     pub async fn get_symbol_info(
         &self,
         file_path: String,
-        line: Option<u32>,           // Make Optional
-        character: Option<u32>,      // Make Optional
-        symbol_name: Option<String>, // Add parameter
+        line: u32,
+        character: u32,
     ) -> ToolResult<String> {
-        let (name, server) = self.get_active_server().await?;
+        let (_, server) = self.get_active_server().await?;
         let (_, abs_path, _) = self.validate_and_resolve_path(&file_path).await?;
-
-        let target_pos: Option<Position>;
-        let mut symbol_not_found_msg = None;
         // Input position is 1-based from user, convert to 0-based
-        let input_line = line.map(|l| l.saturating_sub(1));
-        let input_char = character.map(|c| c.saturating_sub(1));
-
-        match (input_line, input_char, &symbol_name) {
-            // Case 1: Position-based lookup
-            (Some(l), Some(c), _) => {
-                info!(
-                    "[{}] Getting symbol info for {}:{}:{} (by position)",
-                     name, file_path, l+1, c+1 // log 1-based
-                );
-                 // Use 0-based
-                target_pos = Some(Position { line: l, character: c });
-            },
-            // Case 2: Name-based lookup
-            (None, None, Some(sym_name)) => {
-                info!(
-                    "[{}] Getting symbol info for '{}' in {} (by name)",
-                    name, sym_name, file_path
-                );
-                // Find the symbol definition within this document
-                 // Async LSP request
-                let symbols: Vec<DocumentSymbol> = server
-                    .list_document_symbols(&abs_path)
-                    .await
-                    .map_err(ToolboxError::ServerError)?;
-
-                 let sym_name_clone = sym_name.clone();
-                 let found_symbol_pos: Option<Position> = spawn_blocking(move || {
-                      find_symbol_by_name_in_hierarchy(&symbols, &sym_name_clone)
-                           // Use the start of the symbol's selection range as the target position
-                          .map(|found| found.selection_range.start.into())
-                  }).await.map_err(ToolboxError::TaskJoin)?;
-
-                if let Some(pos) = found_symbol_pos {
-                     target_pos = Some(pos);
-                     debug!("[{}] Found symbol '{}' definition at {:?}", name, sym_name, target_pos);
-                 }
-                else {
-                    // Symbol name not defined in this file
-                    target_pos = None;
-                    symbol_not_found_msg = Some(format!(
-                        "Info: Symbol definition '{}' not found within file '{}'.\nIt might be defined elsewhere, or the name is incorrect.\n\n---\nNext Step: Use `search_workspace_symbols` to find the definition file, or provide line/character of the symbol's *usage* in this file.",
-                        sym_name, file_path
-                    ));
-                }
-            },
-            // Case 3: Invalid parameters
-            _ => return Err(ToolboxError::Other("Invalid parameters for get_symbol_info: Provide EITHER both 'line' and 'character' (0-based), OR 'symbol_name'.".into())),
-        }
-
-        // If name lookup failed, return the specific message
-        if let Some(msg) = symbol_not_found_msg {
-            return Ok(msg);
-        }
-        // If no position could be determined (should only happen if name lookup failed, handled above, but check anyway)
-        let pos = match target_pos {
-            Some(p) => p,
-            None => {
-                // Should be unreachable due to prior checks
-                return Ok(format!(
-                    "Internal Error: Could not determine position for symbol in {}.\n\n---\nNext Step: Verify parameters.",
-                    file_path
-                ));
-            }
+        let pos = Position {
+            line: line.saturating_sub(1),
+            character: character.saturating_sub(1),
         };
 
         // get_api_structure uses goto-definition internally, so it works whether
@@ -766,12 +724,11 @@ Next Step: {}",
             }
             None => Ok(format!(
                 // Message reflects uncertainty of input method
-                "Info: No detailed symbol information or definition found for the symbol at {}:{}:{} or named '{}'.\n\n---\nNext Step: {}",
+                "Info: No detailed symbol information or definition found for the symbol at {}:{}:{}.\n\n---\nNext Step: {}",
                 file_path,
                 // Display 1-based
-                line.unwrap_or(pos.line + 1),
-                character.unwrap_or(pos.character + 1),
-                symbol_name.as_deref().unwrap_or("(none)"),
+                line,
+                character,
                 guidance
             )),
         }
@@ -800,7 +757,7 @@ Next Step: {}",
                 // Convert Nested WorkspaceSymbol to Flat SymbolInformation
                 Some(WorkspaceSymbolResponse::Nested(workspace_symbols)) => {
                     workspace_symbols
-                        .into_iter()
+                        .into_par_iter()
                         .map(|ws| {
                             let location = match ws.location {
                                 OneOf::Left(location) => location,
@@ -842,9 +799,35 @@ Next Step: {}",
         .await
         .map_err(ToolboxError::TaskJoin)??; // Handle JoinError and ToolResult
 
-        let json_output = serde_json::to_string_pretty(&flat_symbols)?;
+        // Group symbols by kind and handle dummy ranges (0:0)
+        use std::collections::BTreeMap;
+        let mut grouped_symbols: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+        for sym in &flat_symbols {
+            let entry = if sym.line == 0 && sym.character == 0 {
+                // Dummy range, just show the file path
+                format!("{}", sym.file_path)
+            } else {
+                // Normal symbol with valid range
+                format!("{}: ({}, {})", sym.name, sym.line + 1, sym.character + 1)
+            };
+            grouped_symbols
+                .entry(sym.kind.clone())
+                .or_default()
+                .push(entry);
+        }
+
+        // Build output string grouped by kind
+        let mut output_str = "Workspace symbol search results:\n".to_string();
+        for (kind, symbols) in grouped_symbols {
+            output_str.push_str(&format!("\nKind: {}\n", kind));
+            for symbol in symbols {
+                output_str.push_str(&format!("  {}\n", symbol));
+            }
+        }
+
         let guidance = "Review the search results. Next: Use `get_symbol_info` with file_path and EITHER line/character OR symbol_name to get details.";
-        Ok(format!("{}\n\n---\nNext Step: {}", json_output, guidance))
+        Ok(format!("{}\n\n---\nNext Step: {}", output_str, guidance))
     }
 
     // --- test_project ---

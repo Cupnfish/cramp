@@ -4,7 +4,6 @@ use crate::error::ToolboxError;
 use std::fs;
 use std::path::Path;
 
-
 pub fn apply_lsp_edits_to_file(path: &Path, edits: &[lsp_types::TextEdit]) -> ToolResult<String> {
     let original_content = fs::read_to_string(path)?;
     let new_content = apply_edits_to_string(&original_content, edits)
