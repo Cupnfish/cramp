@@ -799,9 +799,9 @@ Next Step: {}",
         .await
         .map_err(ToolboxError::TaskJoin)??; // Handle JoinError and ToolResult
 
-        // Group symbols by kind and handle dummy ranges (0:0)
+        // Group symbols by file path first, then by kind
         use std::collections::BTreeMap;
-        let mut grouped_symbols: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut grouped_by_file: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
 
         for sym in &flat_symbols {
             let entry = if sym.line == 0 && sym.character == 0 {
@@ -811,18 +811,24 @@ Next Step: {}",
                 // Normal symbol with valid range
                 format!("{}: ({}, {})", sym.name, sym.line + 1, sym.character + 1)
             };
-            grouped_symbols
+
+            grouped_by_file
+                .entry(sym.file_path.clone())
+                .or_default()
                 .entry(sym.kind.clone())
                 .or_default()
                 .push(entry);
         }
 
-        // Build output string grouped by kind
+        // Build output string grouped by file path
         let mut output_str = "Workspace symbol search results:\n".to_string();
-        for (kind, symbols) in grouped_symbols {
-            output_str.push_str(&format!("\nKind: {}\n", kind));
-            for symbol in symbols {
-                output_str.push_str(&format!("  {}\n", symbol));
+        for (file_path, kinds) in grouped_by_file {
+            output_str.push_str(&format!("\nFile: {}\n", file_path));
+            for (kind, symbols) in kinds {
+                output_str.push_str(&format!("  Kind: {}\n", kind));
+                for symbol in symbols {
+                    output_str.push_str(&format!("    {}\n", symbol));
+                }
             }
         }
 

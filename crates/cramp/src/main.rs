@@ -255,10 +255,12 @@ async fn run_server(transport: TransportCommand) -> Result<()> {
 
     // Initialize the service with the project path
     info!("Initializing service with project path: {:?}", project_path);
-    let project_name = project_path
+    let canonical_path = project_path
         .canonicalize()
         .map_err(|e| warn!("Failed to canonicalize path: {}", e))
-        .ok()
+        .ok();
+    let project_name = canonical_path
+        .as_ref()
         .and_then(|p| {
             p.file_name()
                 .and_then(|name| name.to_str())
@@ -270,7 +272,7 @@ async fn run_server(transport: TransportCommand) -> Result<()> {
         });
     if let Err(e) = service
         .toolbox
-        .initialize_project(project_name, project_path)
+        .initialize_project(project_name, canonical_path.unwrap_or(project_path))
         .await
     {
         error!("Failed to initialize project: {}", e);

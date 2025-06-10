@@ -245,11 +245,42 @@ impl RaServer {
             },
             initialization_options: Some(json!({
                 "check": { "command": "check", "features": "all" }, // check all features
-                "cargo": { "allFeatures": true, "loadOutDirsFromCheck": true, "features": "all" },
+                "cargo": {
+                    "allFeatures": true,
+                    "loadOutDirsFromCheck": true,
+                    "features": "all",
+                    "buildScripts": {
+                        "enable": true
+                    }
+                },
                 "procMacro": { "enable": true },
-                 "rustfmt": {"extraArgs": ["+nightly"]}, // if needed
-                 "lens": { "enable": false }, // Disable code lens for performance
-                 "inlayHints": { "enable": false }, // Disable inlay hints for performance
+                "rustfmt": {"extraArgs": ["+nightly"]}, // if needed
+                "lens": { "enable": false }, // Disable code lens for performance
+                "inlayHints": { "enable": false }, // Disable inlay hints for performance
+                "workspace": {
+                    "symbol": {
+                        "search": {
+                            "scope": "workspace",
+                            "kind": "all_symbols"
+                        }
+                    }
+                },
+                "completion": {
+                    "addCallArgumentSnippets": false,
+                    "addCallParenthesis": false
+                },
+                "diagnostics": {
+                    "enable": true,
+                    "enableExperimental": false
+                },
+                "files": {
+                    "excludeDirs": [".git", "target", "node_modules"]
+                },
+                "imports": {
+                    "granularity": {
+                        "group": "module"
+                    }
+                }
             })),
             workspace_folders: Some(vec![WorkspaceFolder {
                 uri: url_to_lsp_uri_owned(root_uri),
