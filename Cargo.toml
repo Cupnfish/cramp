@@ -41,6 +41,7 @@ similar = "2.2" # Diff generation
 itertools = "0.14"
 
 bytes = "1.4" # For codec
+strsim = "0.11" # For fuzzy string matching
 
 
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "db03f63" }
@@ -57,3 +58,5 @@ crossterm = "0.29"
 comrak = "0.39"    # Markdown parsing for documentation
 syntect = "5.2"
 scopeguard = "1.2"
+
+rayon = "1"

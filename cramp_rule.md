@@ -1,38 +1,161 @@
-# CRAMP MCP Interaction Rules & Workflow Guide (LLM Specific)
+# CRAMP MCP Interaction Rules & Workflow Guide (LLM Agent Specification)
 
-**Goal**: To guide the LLM Agent in the precise and efficient use of the CRAMP toolset for analysing, fixing, and verifying Rust project tasks. You **MUST** strictly adhere to the following rules and workflow.
+**Primary Objective**: To provide comprehensive guidance for LLM agents in the precise, efficient, and reliable use of the CRAMP (Cargo Rust Analysis & Management Platform) toolset for analyzing, diagnosing, fixing, and verifying Rust project tasks. Strict adherence to these rules and workflows is **MANDATORY** for successful operation.
 
-**Core Principle**: Trust the tool output, follow the workflow, pay strict attention to state management (active project, cache/ID invalidation), and prioritize the "Next Step" guidance returned by the tools. Client-side I/O (reading files, manual writes) is your responsibility.
-
----
-
-## 🌟 Golden Rules - MUST Follow!
-
-1.  **Workflow Driven**: You **MUST** strictly follow the standard workflow defined below. Do not skip steps; do not guess.
-2.  **Follow Guidance**: Each tool's return value includes explicit `--- Next Step: ... ---` guidance. You **MUST** read and prioritize this guidance in your decision-making.
-3.  **Cache & ID Invalidation Mechanism (CRITICAL!)**: State is cached; understand invalidation:
-    *   `list_diagnostics`: Running this tool performs a fresh check, updates the diagnostic cache, and **invalidates ALL** previously generated `fix_id`s for the active project.
-    *   `apply_fix`: Applying *any* fix **invalidates ALL** `fix_id`s AND the entire diagnostic cache for the active project. You **MUST** re-run `list_diagnostics` afterwards.
-	*   `test_project`: Running tests **invalidates ALL** `fix_id`s AND the entire diagnostic cache for the active project.
-    *   **Manual Client-Side Edit**: If your environment performs a file write operation outside of `apply_fix`, the server's cached diagnostics, fixes, and internal LSP state become stale. You **MUST** re-run `list_diagnostics` afterwards to resynchronise.
-    *   **NEVER** attempt to use a `fix_id` after any operation that invalidates it (`list_diagnostics`, `apply_fix`, `test_project`, or any manual client-side edit).
-4.  **0-Based Indexing (CRITICAL!)**:
-   * All line/column numbers returned in JSON by tools (`list_diagnostics`, `list_document_symbols`, `search_workspace_symbols`) are **0-based**.
-   * All line/column number parameters you provide to tools (`get_symbol_info`) **MUST** be **0-based**.
-5.  **Relative Paths**: All parameters and return values involving `file_path` are paths relative to the current active project's root directory (e.g., `src/main.rs`). **NEVER** use absolute paths.
-6.  **Active Project Context**: All tools, except `manage_projects`, operate exclusively on the currently **active project**. Ensure one is set and it is the correct one. `manage_projects` clears caches when switching projects.
-7.  **Prioritize Auto-Fix**: The sequence `list_diagnostics` -> `get_code_actions` -> `apply_fix` is the preferred way to modify code. If `get_code_actions` provides a suitable fix (check description and `diff`), you **MUST prioritize** using `apply_fix` over attempting a manual client-side edit.
-8. **Client-Side I/O Responsibility**:
-    * The CRAMP tools do **not** include general-purpose `read_file` or `write_file` / `edit_file` tools (only `apply_fix` writes).
-    * Your environment (the client) **MUST** provide the ability to read file content when needed for manual analysis.
-	* Your environment (the client) **MUST** provide the ability to write/edit files when a manual fix (not `apply_fix`) is required. Remember Rule #3: manual edits require a subsequent `list_diagnostics` call.
-9. **Exact Matching**: `get_code_actions` requires the *exact* `file_path` and `diagnostic_message` string as returned by the *most recent* `list_diagnostics` call.
+**Fundamental Principles**: 
+- **Trust Tool Output**: Always rely on tool responses as authoritative sources of information
+- **Follow Prescribed Workflow**: Execute the standardized workflow without deviation or shortcuts
+- **State Management Vigilance**: Pay critical attention to active project context and cache/ID invalidation mechanisms
+- **Guidance Priority**: Prioritize and act upon the "Next Step" guidance returned by each tool
+- **Client I/O Responsibility**: Your environment (client) is responsible for file reading and manual writing operations (except `apply_fix`)
 
 ---
 
-## 🔄 The Mandatory Workflow
+## 🌟 Golden Rules - MANDATORY COMPLIANCE!
 
-Your thoughts and actions must follow this flow: `Setup` -> `Diagnose` -> `Investigate/Act` -> `Verify` -> `Loop/Complete`.
+### 1. **Workflow Adherence (NON-NEGOTIABLE)**
+You **MUST** strictly follow the standardized workflow defined below without deviation, shortcuts, or assumptions. Each step serves a critical purpose in maintaining system integrity and achieving reliable results.
+
+### 2. **Next Step Guidance Compliance**
+Every tool response includes explicit `--- Next Step: ... ---` guidance. You **MUST** read, understand, and prioritize this guidance in your decision-making process. This guidance is algorithmically generated based on current system state and represents the optimal next action.
+
+### 3. **Cache & ID Invalidation Mechanism (ABSOLUTELY CRITICAL!)**
+The system employs sophisticated caching for performance optimization. Understanding and respecting invalidation rules is **ESSENTIAL** for correct operation:
+
+**Invalidation Triggers:**
+- **`list_diagnostics`**: Executes fresh `cargo check`, updates diagnostic cache, **invalidates ALL** previously generated `fix_id`s for the active project
+- **`apply_fix`**: Applying *any* automatic fix **invalidates ALL** `fix_id`s AND the entire diagnostic cache for the active project. You **MUST** re-run `list_diagnostics` immediately afterward
+- **`test_project`**: Running tests **invalidates ALL** `fix_id`s AND the entire diagnostic cache for the active project
+- **Manual Client-Side Edits**: Any file write operation performed outside of `apply_fix` makes server cache stale. You **MUST** re-run `list_diagnostics` afterward to resynchronize
+
+**Critical Prohibition**: **NEVER** attempt to use a `fix_id` after any invalidating operation (`list_diagnostics`, `apply_fix`, `test_project`, or manual client-side edit).
+
+### 4. **0-Based Indexing System (CRITICAL!)**
+- **Input**: All line/character number parameters you provide to tools (`get_symbol_info`) **MUST** be **0-based**
+- **Output**: All line/character numbers returned in JSON by tools (`list_diagnostics`, `list_document_symbols`, `search_workspace_symbols`) are **0-based**
+- **Consistency**: Maintain 0-based indexing throughout all operations to prevent off-by-one errors
+
+### 5. **Relative Path Convention**
+All parameters and return values involving `file_path` are paths relative to the current active project's root directory (e.g., `src/main.rs`, `tests/integration_test.rs`). **ABSOLUTELY NEVER** use absolute paths in tool parameters.
+
+### 6. **Active Project Context Management**
+All tools except `manage_projects` operate exclusively on the currently **active project**. You must:
+- Ensure an active project is set before using other tools
+- Verify you're operating on the correct project
+- Remember that `manage_projects` clears all caches when switching projects
+
+### 7. **Automated Fix Prioritization**
+The sequence `list_diagnostics` → `get_code_actions` → `apply_fix` is the **preferred and optimized** method for code modification. If `get_code_actions` provides a suitable fix (verify description and `diff` preview), you **MUST prioritize** using `apply_fix` over manual client-side edits.
+
+### 8. **Client-Side I/O Responsibility & Limitations**
+- **CRAMP Limitation**: The toolset does **NOT** include general-purpose `read_file` or `write_file`/`edit_file` tools (only `apply_fix` performs writes)
+- **Client Requirement**: Your environment **MUST** provide file reading capability for manual analysis
+- **Client Requirement**: Your environment **MUST** provide file writing/editing capability for manual fixes
+- **Critical Reminder**: Manual edits require subsequent `list_diagnostics` call (Rule #3)
+
+### 9. **Exact String Matching Requirement**
+`get_code_actions` requires **EXACT** `file_path` and `diagnostic_message` strings as returned by the *most recent* `list_diagnostics` call. Even minor variations (whitespace, punctuation) will cause failures.
+
+---
+
+## 🔄 Mandatory Workflow - STRICT ADHERENCE REQUIRED
+
+### Phase 1: Project Initialization & Context Setup
+**Objective**: Establish working context and identify target project
+
+1. **`manage_projects`** - List all available Rust projects and set the active project
+   - **Critical**: This clears all caches when switching projects
+   - **Verification**: Confirm the correct project is now active
+   - **Next**: Proceed only after successful project activation
+
+### Phase 2: Comprehensive Diagnostic Assessment
+**Objective**: Obtain complete picture of current project health
+
+2. **`list_diagnostics`** - Execute fresh `cargo check` to get current compilation errors/warnings
+   - **Critical**: This invalidates ALL previous `fix_id`s
+   - **Analysis**: Review all diagnostics for severity and patterns
+   - **Prioritization**: Focus on errors before warnings
+   - **Next**: Proceed to investigation if diagnostics exist, or verification if clean
+
+### Phase 3: Strategic Code Investigation (Conditional)
+**Objective**: Gather necessary context for understanding and fixing issues
+
+3. **`get_file_tree`** - Map project structure and identify key components
+   - **Purpose**: Understand project organization and locate relevant files
+   - **Focus**: Pay attention to source directories, test directories, and configuration files
+
+4. **`list_document_symbols`** - Analyze symbols within specific problematic files
+   - **Purpose**: Understand file-level structure (functions, structs, implementations)
+   - **Strategy**: Target files mentioned in diagnostic messages
+
+5. **`search_workspace_symbols`** - Locate symbols across the entire workspace
+   - **Purpose**: Find definitions, implementations, and usages of problematic symbols
+   - **Scope**: Use when diagnostics reference symbols not immediately visible
+
+6. **`get_symbol_info`** - Obtain detailed information about specific symbols
+   - **Purpose**: Get precise location, signature, and context of symbols
+   - **Precision**: Use exact coordinates from previous symbol searches
+
+### Phase 4: Automated Repair Execution (Preferred Path)
+**Objective**: Apply automated fixes when available and suitable
+
+7. **`get_code_actions`** - Query available automatic fixes for specific diagnostics
+   - **Precision**: Use EXACT `file_path` and `diagnostic_message` from latest `list_diagnostics`
+   - **Evaluation**: Review fix descriptions and diff previews carefully
+   - **Decision**: Proceed only if fix addresses the root cause appropriately
+
+8. **`apply_fix`** - Execute the selected automatic fix
+   - **Critical**: This invalidates ALL `fix_id`s and diagnostic cache
+   - **Immediate Action**: Must run `list_diagnostics` immediately after
+   - **Verification**: Confirm the fix was applied successfully
+
+### Phase 5: Manual Repair Implementation (Fallback Path)
+**Objective**: Address issues when automated fixes are unavailable or unsuitable
+
+9. **Manual Code Modification** - Use your environment's file editing capabilities
+   - **Approach**: Apply targeted fixes based on diagnostic analysis and code investigation
+   - **Best Practices**: Make minimal, focused changes that address root causes
+   - **Documentation**: Consider adding comments explaining complex fixes
+
+10. **`list_diagnostics`** - Mandatory re-check after manual changes
+    - **Purpose**: Cache invalidation and fresh diagnostic assessment
+    - **Critical**: This step is NON-OPTIONAL after any manual edit
+    - **Analysis**: Verify manual changes resolved intended issues without introducing new ones
+
+### Phase 6: Comprehensive Verification & Validation
+**Objective**: Ensure fixes are complete, correct, and don't introduce regressions
+
+11. **`test_project`** - Execute project test suite
+    - **Purpose**: Verify fixes don't break existing functionality
+    - **Critical**: This invalidates ALL `fix_id`s and diagnostic cache
+    - **Analysis**: Review test results for any new failures or regressions
+
+12. **`list_diagnostics`** - Final diagnostic verification
+    - **Purpose**: Confirm all targeted issues are resolved
+    - **Success Criteria**: Zero errors, minimal warnings
+    - **Completion**: Project is ready for use when diagnostics are clean
+
+### Workflow Success Criteria
+- **Zero compilation errors** in final `list_diagnostics`
+- **All tests passing** in `test_project`
+- **No new issues introduced** during the repair process
+- **Clean project state** ready for continued development
+
+---
+
+## 🎯 Summary: Your Mission
+
+As an LLM agent working with CRAMP, your mission is to:
+
+1. **Maintain System Integrity**: Respect cache invalidation rules and follow the mandatory workflow without deviation
+2. **Prioritize Automation**: Use `apply_fix` whenever suitable automatic fixes are available
+3. **Ensure Completeness**: Never leave a project in a broken state; always verify fixes through testing
+4. **Follow Guidance**: Trust and act upon the "Next Step" guidance provided by each tool
+5. **Communicate Clearly**: Report your progress, findings, and any limitations encountered
+
+**Remember**: CRAMP is designed to make Rust development more efficient and reliable. By following these rules strictly, you become a powerful ally in maintaining code quality and resolving issues systematically.
+
+**Your workflow mantra**: `Setup` → `Diagnose` → `Investigate/Act` → `Verify` → `Loop/Complete`
 
 ```mermaid
 graph TD
@@ -101,7 +224,7 @@ graph TD
         *   **MUST** be called *before* calling `get_code_actions`.
         *   **MUST** be re-called after *any* code modification (`apply_fix` or manual client-side edit) or after `test_project`.
         *   **Side-effect**: Invalidates all previously known `fix_id`s.
-        *   Parse the JSON: Focus on `severity`, `message`, `file_path`, `line` (**0-based!**), `column` (**0-based!**).
+        *   Parse the JSON: Focus on `severity`, `message`, `file_path`, `line` (**0-based!**), `character` (**0-based!**).
         *   If the return indicates no errors, proceed to the **Verify** step (`test_project`).
 
 3. **Find Fix: `get_code_actions`**
@@ -127,7 +250,7 @@ graph TD
     *    **Purpose**: Manually understand and modify code when no suitable auto-fix is available, or when tests fail.
     *    **Priority**: Lower than `apply_fix`.
     *    **Sub-steps & Tools**:
-        *   **`get_symbol_info`**: Get API details (docs, signature, definition structure, methods, fields) for the code symbol. Provide `file_path` AND EITHER `line`/`column` (0-based) OR `symbol_name`. Output is Markdown.
+        *   **`get_symbol_info`**: Get API details (docs, signature, definition structure, methods, fields) for the code symbol. Provide `file_path` AND EITHER `line`/`character` (0-based) OR `symbol_name`. Output is Markdown.
 		*   **`list_document_symbols`**: Get JSON list of symbols (structs, funcs, etc.) in a `file_path`. Locations are **0-based**.
 		*   **`search_workspace_symbols`**: Find symbols matching `query` across the project. JSON list, locations are **0-based**.
         *   **`get_file_tree`**: Get text tree if the one from `manage_projects` is stale or insufficient.
@@ -173,16 +296,16 @@ graph TD
      *   MUST re-run `list_diagnostics` after calling.
 *   **`get_file_tree()`**
     *   Exploration. Output is a text tree with relative paths.
-*    **`list_document_symbols(file_path: String)`**
+*   **`list_document_symbols(file_path: String)`**
      *   Exploration. `file_path` is relative.
-     *   Output `line` and `column` are **0-based** (JSON).
-*     **`get_symbol_info(file_path: String, line: Option<u32>, column: Option<u32>, symbol_name: Option<String>)`**
+     *   Output `line` and `character` are **0-based** (JSON).
+*     **`get_symbol_info(file_path: String, line: Option<u32>, character: Option<u32>, symbol_name: Option<String>)`**
       *  API details.
-      *  `file_path` is relative. Provide `file_path` AND EITHER `line`/`column` (0-based) OR `symbol_name`.
+      *  `file_path` is relative. Provide `file_path` AND EITHER `line`/`character` (0-based) OR `symbol_name`.
       *  Output is Markdown summary of docs, fields, methods etc.
 *    **`search_workspace_symbols(query: String)`**
       * Exploration.
-      * Output `line` and `column` are **0-based** (JSON).
+      * Output `line` and `character` are **0-based** (JSON).
 *   **`test_project(test_name: Option<String>)`**
     *   Verification.
     *   Output is raw `cargo test` text. Carefully analyze success/failure messages.
@@ -198,7 +321,7 @@ graph TD
 *   **Pitfall 1**: Attempting to use a `fix_id` after it has been invalidated.
     *   **Invalidators**: `list_diagnostics`, `apply_fix`, `test_project`, any manual client-side edit.
     *   **Avoid**: Always follow the loop: ensure `fix_id` comes from `get_code_actions` called *immediately* after the *most recent* `list_diagnostics`, with no intervening invalidating operations. After `apply_fix` or manual edit, you MUST re-run `list_diagnostics`.
-*   **Pitfall 2**: Calling `get_symbol_info` or interpreting JSON output using 1-based line/column numbers.
+*   **Pitfall 2**: Calling `get_symbol_info` or interpreting JSON output using 1-based line/character numbers.
     *   **Avoid**: Always remember the interface is **0-based**.
 *   **Pitfall 3**: Calling tools (except `manage_projects`) without an active project set.
     *   **Avoid**: Ensure `manage_projects` is run first and successfully sets an active project. Check its output.

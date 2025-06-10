@@ -6,38 +6,29 @@ use lsp_types::{
     self as lsp, DiagnosticSeverity, DocumentSymbol, SymbolInformation, SymbolKind, WorkspaceEdit,
 };
 use path_clean::PathClean;
+use rayon::prelude::*;
 use similar::{ChangeTag, TextDiff};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use tokio::task::spawn_blocking;
 use url::Url;
 
-// --- Position / Range / Location (0-based <-> 0-based LSP) ---
+pub async fn async_path_to_uri(path: &Path) -> Result<Url> {
+    let path = path.to_path_buf();
+    spawn_blocking(move || {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(&path)
+        }
+        .clean();
+        let canonical = std::fs::canonicalize(&absolute).unwrap_or(absolute);
+        Url::from_file_path(&canonical).map_err(|_| RaError::PathToUri(canonical))
+    })
+    .await
+    .map_err(RaError::TaskJoin)?
+}
 
-pub fn position_to_lsp(pos: &Position) -> lsp::Position {
-    lsp::Position {
-        line: pos.line,
-        character: pos.column,
-    }
-}
-pub fn lsp_position_to_my(pos: &lsp::Position) -> Position {
-    Position {
-        line: pos.line,
-        column: pos.character,
-    }
-}
-pub fn range_to_lsp(range: &Range) -> lsp::Range {
-    lsp::Range {
-        start: position_to_lsp(&range.start),
-        end: position_to_lsp(&range.end),
-    }
-}
-pub fn lsp_range_to_my(range: &lsp::Range) -> Range {
-    Range {
-        start: lsp_position_to_my(&range.start),
-        end: lsp_position_to_my(&range.end),
-    }
-}
-// path_to_uri correctly uses url::Url
 pub fn path_to_uri(path: &Path) -> Result<Url> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -45,24 +36,32 @@ pub fn path_to_uri(path: &Path) -> Result<Url> {
         std::env::current_dir()?.join(path)
     }
     .clean();
-    // Ensure canonical path for consistency
     let canonical = std::fs::canonicalize(&absolute).unwrap_or(absolute);
     Url::from_file_path(&canonical).map_err(|_| RaError::PathToUri(canonical))
 }
 
-// Convert url::Url to lsp_types::Uri
 pub fn url_to_lsp_uri(url: &Url) -> lsp::Uri {
     lsp::Uri::from_str(url.as_str()).expect("Valid URL should convert to LSP Uri")
 }
 
-// Convert url::Url to lsp_types::Uri (consuming version)
 pub fn url_to_lsp_uri_owned(url: Url) -> lsp::Uri {
     lsp::Uri::from_str(url.as_str()).expect("Valid URL should convert to LSP Uri")
 }
 
-// Convert lsp_types::Uri to url::Url
 pub fn lsp_uri_to_url(uri: &lsp::Uri) -> Result<Url> {
     Url::parse(uri.as_str()).map_err(RaError::UriParseError)
+}
+
+pub async fn async_uri_to_path(uri: &lsp::Uri) -> Result<PathBuf> {
+    let uri_string = uri.as_str().to_string();
+    spawn_blocking(move || {
+        let as_url: url::Url = url::Url::parse(&uri_string)?;
+        as_url
+            .to_file_path()
+            .map_err(|_| RaError::UriToPath(as_url))
+    })
+    .await
+    .map_err(RaError::TaskJoin)?
 }
 
 pub fn uri_to_path(uri: &lsp::Uri) -> Result<PathBuf> {
@@ -72,10 +71,17 @@ pub fn uri_to_path(uri: &lsp::Uri) -> Result<PathBuf> {
         .map_err(|_| RaError::UriToPath(as_url))
 }
 
+pub async fn async_lsp_location_to_my(location: &lsp::Location) -> Result<Location> {
+    Ok(Location {
+        path: async_uri_to_path(&location.uri).await?,
+        range: location.range.into(),
+    })
+}
+
 pub fn lsp_location_to_my(location: &lsp::Location) -> Result<Location> {
     Ok(Location {
         path: uri_to_path(&location.uri)?,
-        range: lsp_range_to_my(&location.range),
+        range: location.range.into(),
     })
 }
 
@@ -112,7 +118,6 @@ pub fn symbol_kind_to_string(kind: &MySymbolKind) -> String {
     format!("{:?}", kind).to_lowercase()
 }
 
-/// Recursively flatten DocumentSymbol hierarchy
 pub fn flatten_document_symbols(
     symbols: &[DocumentSymbol],
     path: PathBuf, // Absolute path
@@ -120,13 +125,13 @@ pub fn flatten_document_symbols(
     get_relative_path_fn: &dyn Fn(&Path) -> String,
 ) {
     for symbol in symbols {
-        let start_pos = lsp_position_to_my(&symbol.selection_range.start);
+        let start_pos = symbol.selection_range.start;
         results.push(FlatSymbol {
             name: symbol.name.clone(),
             kind: symbol_kind_to_string(&lsp_symbol_kind_to_my(symbol.kind)),
             file_path: get_relative_path_fn(&path),
             line: start_pos.line,
-            column: start_pos.column,
+            character: start_pos.character,
         });
         if let Some(children) = &symbol.children {
             flatten_document_symbols(children, path.clone(), results, get_relative_path_fn);
@@ -134,7 +139,6 @@ pub fn flatten_document_symbols(
     }
 }
 
-/// Convert workspace symbols (SymbolInformation) to FlatSymbol
 pub fn workspace_symbols_to_flat(
     symbols: &[SymbolInformation],
     get_relative_path_fn: &dyn Fn(&Path) -> String,
@@ -143,58 +147,81 @@ pub fn workspace_symbols_to_flat(
         .iter()
         .map(|symbol| {
             let path = uri_to_path(&symbol.location.uri)?;
-            let start_pos = lsp_position_to_my(&symbol.location.range.start);
+            let start_pos = symbol.location.range.start;
             Ok(FlatSymbol {
                 name: symbol.name.clone(),
                 kind: symbol_kind_to_string(&lsp_symbol_kind_to_my(symbol.kind)),
                 file_path: get_relative_path_fn(&path),
                 line: start_pos.line,
-                column: start_pos.column,
+                character: start_pos.character,
             })
         })
         .collect()
 }
 
-// *** USABILITY: Add new helper function ***
-/// Helper to find the first symbol matching the name in the DocumentSymbol hierarchy
+pub fn workspace_symbols_to_flat_optimized(
+    symbols: &[SymbolInformation],
+    root_path: &std::path::Path,
+) -> Result<Vec<FlatSymbol>> {
+    use pathdiff::diff_paths;
+
+    let results: Result<Vec<_>> = symbols
+        .par_iter()
+        .map(|symbol| {
+            let path = uri_to_path(&symbol.location.uri)?;
+            let start_pos = symbol.location.range.start;
+
+            let file_path = diff_paths(&path, root_path)
+                .unwrap_or_else(|| path.to_path_buf())
+                .display()
+                .to_string();
+
+            Ok(FlatSymbol {
+                name: symbol.name.clone(),
+                kind: symbol_kind_to_string(&lsp_symbol_kind_to_my(symbol.kind)),
+                file_path,
+                line: start_pos.line,
+                character: start_pos.character,
+            })
+        })
+        .collect();
+    results
+}
+
 pub fn find_symbol_by_name_in_hierarchy<'a>(
     symbols: &'a [DocumentSymbol],
     name: &str,
 ) -> Option<&'a DocumentSymbol> {
-    // Check children first for more specific symbols (e.g., method within a struct)
     for symbol in symbols {
+        if symbol.name == name {
+            return Some(symbol);
+        }
         if let Some(children) = &symbol.children {
             if let Some(child) = find_symbol_by_name_in_hierarchy(children, name) {
-                // Prioritize certain kinds if the name matches exactly? For now, first match.
-                if child.name == name {
-                    return Some(child);
-                }
+                return Some(child);
             }
         }
     }
-    // If not found in any children, check the top-level symbols in this slice
-    symbols.iter().find(|symbol| symbol.name == name)
+    None
 }
-// ******************************************
 
-// Helper to flatten DocumentSymbol hierarchy
 pub fn find_symbol_in_hierarchy<'a>(
     symbols: &'a [DocumentSymbol],
     range: &lsp::Range,
 ) -> Option<&'a DocumentSymbol> {
     for symbol in symbols {
-        // Check if the target range is within this symbol's range
         if symbol.range.start <= range.start && symbol.range.end >= range.end {
             if let Some(children) = &symbol.children {
                 if let Some(child) = find_symbol_in_hierarchy(children, range) {
-                    return Some(child); // Return more specific child
+                    return Some(child);
                 }
             }
-            return Some(symbol); // Return this if no child is more specific
+            return Some(symbol);
         }
     }
     None
 }
+
 pub fn extract_hover_docs(hover: &lsp::Hover) -> Option<String> {
     match &hover.contents {
         lsp::HoverContents::Scalar(lsp::MarkedString::String(s)) => Some(s.clone()),
@@ -212,7 +239,6 @@ pub fn extract_hover_docs(hover: &lsp::Hover) -> Option<String> {
     }
 }
 
-// --- Cargo Metadata (1-based to 0-based MyDiagnostic) ---
 pub fn cargo_diag_to_my(
     diag: &cargo_metadata::diagnostic::Diagnostic,
     root_path: &Path,
@@ -232,18 +258,19 @@ pub fn cargo_diag_to_my(
         .iter()
         .filter_map(|span| {
             let path = root_path.join(&span.file_name).clean();
-            // Cargo is 1-based, convert to 0-based
             let start = Position {
                 line: span.line_start.saturating_sub(1) as u32,
-                column: span.column_start.saturating_sub(1) as u32,
+                character: span.column_start.saturating_sub(1) as u32,
             };
             let end = Position {
                 line: span.line_end.saturating_sub(1) as u32,
-                column: span.column_end.saturating_sub(1) as u32,
+                character: span.column_end.saturating_sub(1) as u32,
             };
             if start > end {
-                warn!("Invalid range from cargo: {:?} at {:?}", span, path);
-                return None;
+                if !(start.line == end.line && start.character > end.character) {
+                    warn!("Invalid range from cargo: {:?} at {:?}", span, path);
+                    return None;
+                }
             }
             Some(MyDiagnostic {
                 location: Location {
@@ -258,12 +285,8 @@ pub fn cargo_diag_to_my(
         .collect()
 }
 
-// --- WorkspaceEdit -> Diff / FileEdit ---
-
-// Convert LSP WorkspaceEdit to our FileEdit collection
 pub fn workspace_edit_to_file_edits(edit: &WorkspaceEdit) -> Result<Vec<FileEdit>> {
     let mut file_edits_map = std::collections::HashMap::new();
-    // Note: Only handling `changes`, not `document_changes` (create/rename/delete)
     if let Some(changes) = &edit.changes {
         for (uri, edits) in changes {
             let path = uri_to_path(uri)?;
@@ -273,23 +296,41 @@ pub fn workspace_edit_to_file_edits(edit: &WorkspaceEdit) -> Result<Vec<FileEdit
                 .extend(edits.clone());
         }
     }
-    // Sort edits within each file descending!
+    if let Some(doc_changes) = &edit.document_changes {
+        match doc_changes {
+            lsp::DocumentChanges::Edits(edits_vec) => {
+                for doc_edit in edits_vec {
+                    let path = uri_to_path(&doc_edit.text_document.uri)?;
+                    file_edits_map.entry(path).or_insert_with(Vec::new).extend(
+                        doc_edit.edits.iter().map(|e| match e {
+                            lsp::OneOf::Left(te) => te.clone(),
+                            lsp::OneOf::Right(ate) => ate.text_edit.clone(),
+                        }),
+                    );
+                }
+            }
+            lsp::DocumentChanges::Operations(_) => {
+                warn!(
+                    "WorkspaceEdit contained resource operations (create/rename/delete) which are ignored."
+                );
+            }
+        }
+    }
+
     Ok(file_edits_map
         .into_iter()
         .map(|(path, mut edits)| {
-            edits.sort_by(|a, b| b.range.start.cmp(&a.range.start));
+            edits.par_sort_by(|a, b| b.range.start.cmp(&a.range.start));
             FileEdit { path, edits }
         })
         .collect())
 }
 
-// Apply edits (MUST be sorted descending!) and generate diff
 pub fn generate_diff_preview(original_content: &str, edits: &[lsp::TextEdit]) -> String {
     let modified = match apply_edits_to_string(original_content, edits) {
         Ok(content) => content,
         Err(e) => return format!("[Error generating diff: {}]", e),
     };
-    // Generate line-based diff
     let diff = TextDiff::from_lines(original_content, &modified);
     diff.iter_all_changes()
         .map(|change| {
@@ -303,7 +344,6 @@ pub fn generate_diff_preview(original_content: &str, edits: &[lsp::TextEdit]) ->
         .collect::<String>()
 }
 
-// Helper to apply edits (assuming edits are sorted descending)
 pub fn apply_edits_to_string(
     original: &str,
     edits: &[lsp::TextEdit],
@@ -313,27 +353,45 @@ pub fn apply_edits_to_string(
         .chain(original.match_indices('\n').map(|(i, _)| i + 1))
         .collect();
 
-    let line_col_to_offset = |line: u32, col: u32| -> Option<usize> {
+    let line_col_to_offset = |line: u32, c: u32, text: &str| -> Option<usize> {
         line_indices.get(line as usize).map(|&start_offset| {
-            let line_end: usize = line_indices
-                .get(line as usize + 1)
-                .copied()
-                .unwrap_or(original.len());
-            let line_len = line_end.saturating_sub(start_offset);
-            // Naive byte offset, LSP character should be UTF-16 code units
-            start_offset + std::cmp::min(col as usize, line_len)
+            let line_content = text.lines().nth(line as usize).unwrap_or("");
+            let char_offset: usize = line_content
+                .chars()
+                .take(c as usize)
+                .map(|c| c.len_utf8())
+                .sum();
+            start_offset + char_offset
         })
     };
 
     for edit in edits {
-        // edits must be sorted descending!
-        let start_offset = line_col_to_offset(edit.range.start.line, edit.range.start.character)
-            .ok_or("Invalid start offset")?;
-        let end_offset = line_col_to_offset(edit.range.end.line, edit.range.end.character)
-            .ok_or("Invalid end offset")?;
-        if start_offset > end_offset || end_offset > content.len() {
-            log::warn!(
-                "Invalid edit range: {}..{} for content len {}, edit: {:?}",
+        let start_offset =
+            line_col_to_offset(edit.range.start.line, edit.range.start.character, &content)
+                .ok_or("Invalid start offset")?;
+        let end_offset =
+            line_col_to_offset(edit.range.end.line, edit.range.end.character, &content)
+                .ok_or("Invalid end offset")?;
+
+        if start_offset > end_offset || end_offset > content.len() || start_offset > content.len() {
+            if start_offset == end_offset
+                && start_offset == content.len()
+                && !edit.new_text.is_empty()
+            {
+            } else {
+                log::warn!(
+                    "Invalid or out-of-bounds edit range: {}..{} for content len {}, edit: {:?}",
+                    start_offset,
+                    end_offset,
+                    content.len(),
+                    edit
+                );
+                continue;
+            }
+        }
+        if !content.is_char_boundary(start_offset) || !content.is_char_boundary(end_offset) {
+            warn!(
+                "Edit range not on char boundary: {}..{} for content len {}, edit: {:?}",
                 start_offset,
                 end_offset,
                 content.len(),
@@ -341,12 +399,12 @@ pub fn apply_edits_to_string(
             );
             continue;
         }
+
         content.replace_range(start_offset..end_offset, &edit.new_text);
     }
     Ok(content)
 }
 
-// --- API Info to Markdown Summary ---
 pub fn api_info_to_summary(api: &MyApiInfo) -> String {
     match api {
         MyApiInfo::Struct(s) => {
@@ -355,32 +413,59 @@ pub fn api_info_to_summary(api: &MyApiInfo) -> String {
                 .iter()
                 .map(|f| format!("  - `{}`: {}", f.name, f.type_str.as_deref().unwrap_or("?")))
                 .join("\n");
+            let fields_str = if fields.is_empty() {
+                "  (none)".to_string()
+            } else {
+                fields
+            };
             let methods = s
                 .methods
                 .iter()
-                .map(|m| format!("  - `fn {}`", m.name))
+                .map(|m| {
+                    format!(
+                        "  - `fn {}{}`",
+                        m.name,
+                        m.signature_str.as_deref().unwrap_or("")
+                    )
+                })
                 .join("\n");
+            let methods_str = if methods.is_empty() {
+                "  (none)".to_string()
+            } else {
+                methods
+            };
             format!(
                 "```rust\n// Struct: {}\nstruct {} {{...}}\n```\n**Docs:** {}\n**Fields:**\n{}\n**Methods:**\n{}",
                 s.name,
                 s.name,
                 s.docs.as_deref().unwrap_or("N/A"),
-                fields,
-                methods
+                fields_str,
+                methods_str
             )
         }
         MyApiInfo::Trait(t) => {
             let methods = t
                 .methods
                 .iter()
-                .map(|m| format!("  - `fn {}`", m.name))
+                .map(|m| {
+                    format!(
+                        "  - `fn {}{}`",
+                        m.name,
+                        m.signature_str.as_deref().unwrap_or("")
+                    )
+                })
                 .join("\n");
+            let methods_str = if methods.is_empty() {
+                "  (none)".to_string()
+            } else {
+                methods
+            };
             format!(
                 "```rust\n// Trait: {}\ntrait {} {{...}}\n```\n**Docs:** {}\n**Methods:**\n{}",
                 t.name,
                 t.name,
                 t.docs.as_deref().unwrap_or("N/A"),
-                methods
+                methods_str
             )
         }
         MyApiInfo::Other {
@@ -393,8 +478,8 @@ pub fn api_info_to_summary(api: &MyApiInfo) -> String {
                 format!(
                     "{}:{}:{}",
                     loc.path.display(),
-                    loc.range.start.line + 1,   // Display as 1-based
-                    loc.range.start.column + 1  // Display as 1-based
+                    loc.range.start.line + 1,
+                    loc.range.start.character + 1
                 )
             });
             format!(

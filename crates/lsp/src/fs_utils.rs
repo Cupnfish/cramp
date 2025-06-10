@@ -9,10 +9,15 @@ use std::path::Path;
 
 // Helper filter
 fn is_relevant(entry: &DirEntry) -> bool {
+    // ignore target directory and hidden files/dirs except root
+    if entry.file_type().map_or(false, |ft| ft.is_dir()) && entry.file_name() == "target" {
+        return false;
+    }
     entry
         .file_name()
         .to_str()
-        .map(|s| !s.starts_with('.') || s == ".") // show root, hide other dotfiles/dirs
+        // show root ".", hide other dotfiles/dirs like .git
+        .map(|s| !s.starts_with('.') || s == ".")
         .unwrap_or(false)
 }
 
@@ -25,20 +30,13 @@ pub fn get_file_tree_string(
     let mut tree_lines = Vec::new();
     let mut items_count = 0; // Initialized here
     let mut truncated_items = 0; // Initialized here
-    // let mut depth_truncated_dirs = 0; // This variable is not used with the synchronous walker
-
-    // The parallel walker code was removed due to complexity and errors.
-    // Switched to a synchronous walker below.
-    // tree_lines.clear(); // Not needed, initialized above
-    // items_count = 0; // Not needed, initialized above
-    // truncated_items = 0; // Not needed, initialized above
-    // depth_truncated_dirs = 0; // This variable is not used with the synchronous walker
     let mut dirs_at_depth_limit = std::collections::HashSet::new();
 
     let walker_sync = WalkBuilder::new(&root_canonical)
-        .hidden(false)
+        .hidden(false) // Don't enter hidden dirs like .git, but is_relevant filters names
         .git_ignore(true)
         .parents(false)
+        .max_depth(max_depth_limit.map(|d| d + 1)) // Set walker depth limit
         .sort_by_file_path(|a, b| a.cmp(b))
         .filter_entry(|e| is_relevant(e))
         .build(); // Synchronous walker
@@ -54,7 +52,8 @@ pub fn get_file_tree_string(
         let entry = match entry_result {
             Ok(e) => e,
             Err(e) => {
-                eprintln!("Error walking directory: {}", e);
+                // Use log::warn instead of eprintln in library code
+                log::warn!("Error walking directory {:?}: {}", root, e);
                 continue;
             }
         };
@@ -62,23 +61,29 @@ pub fn get_file_tree_string(
         let path = entry.path();
         let depth = entry.depth();
 
+        // Simplified depth check as max_depth is set on builder
         if let Some(depth_limit) = max_depth_limit {
+            // Track directories at the limit to report truncation
+            if depth == depth_limit && entry.file_type().map_or(false, |ft| ft.is_dir()) {
+                dirs_at_depth_limit.insert(path.to_path_buf());
+            }
             if depth > depth_limit {
-                if depth == depth_limit + 1 && entry.file_type().map_or(false, |ft| ft.is_dir()) {
-                    if let Some(parent) = path.parent() {
-                        if diff_paths(parent, &root_canonical).map_or(0, |p| p.components().count())
-                            == depth_limit
-                        {
-                            dirs_at_depth_limit.insert(parent.to_path_buf());
-                        }
-                    }
-                }
+                // This path might still be yielded if max_depth is not set on builder
                 continue;
             }
         }
 
         let is_dir = entry.file_type().map_or(false, |ft| ft.is_dir());
-        let type_indicator = if is_dir { "/" } else { "" };
+        // Add "..." if directory content is truncated by depth limit
+        let type_indicator = if is_dir {
+            if dirs_at_depth_limit.contains(path) {
+                "/..."
+            } else {
+                "/"
+            }
+        } else {
+            ""
+        };
 
         let display_path = if path == root_canonical {
             ".".to_string()
@@ -88,25 +93,25 @@ pub fn get_file_tree_string(
             continue;
         };
 
+        // Skip the root entry itself if it's not "."
         if depth == 0 && display_path != "." {
             continue;
         }
-
-        let indent = if depth > 0 {
-            "  ".repeat(depth)
-        } else {
-            "".to_string()
-        };
+        // Only display the root as "." or "./"
         if depth == 0 {
-            tree_lines.push(format!("{}/", display_path));
-        } else {
-            tree_lines.push(format!(
-                "{}{}{}",
-                indent,
-                entry.file_name().to_string_lossy(),
-                type_indicator
-            ));
+            tree_lines.push("./".to_string()); // Always show root as ./
+            items_count += 1;
+            continue; // Root is handled
         }
+
+        let indent = "  ".repeat(depth);
+
+        tree_lines.push(format!(
+            "{}{}{}",
+            indent,
+            entry.file_name().to_string_lossy(),
+            type_indicator
+        ));
         items_count += 1;
     }
 
@@ -116,9 +121,10 @@ pub fn get_file_tree_string(
             truncated_items
         ));
     }
-    if !dirs_at_depth_limit.is_empty() {
+    // Report depth truncation only if items were actually skipped because of it
+    if max_depth_limit.is_some() && !dirs_at_depth_limit.is_empty() && truncated_items == 0 {
         tree_lines.push(format!(
-            "... and content of {} directories truncated (max_depth limit reached)",
+            "... content of {} directories truncated (max_depth limit reached)",
             dirs_at_depth_limit.len()
         ));
     }
@@ -126,7 +132,6 @@ pub fn get_file_tree_string(
     Ok(tree_lines.join("\n"))
 }
 
-// Edits must be sorted descending!
 pub fn apply_lsp_edits_to_file(path: &Path, edits: &[lsp_types::TextEdit]) -> ToolResult<String> {
     let original_content = fs::read_to_string(path)?;
     let new_content = apply_edits_to_string(&original_content, edits)

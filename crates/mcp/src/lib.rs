@@ -63,11 +63,11 @@ struct GetSymbolInfoRequest {
     )]
     line: Option<u32>,
     #[schemars(
-        description = "0-based column number of the symbol (optional if symbol_name is provided)."
+        description = "0-based character number of the symbol (optional if symbol_name is provided)."
     )]
-    column: Option<u32>,
+    character: Option<u32>,
     #[schemars(
-        description = "Name of the symbol to find within the file (optional if line/column are provided)."
+        description = "Name of the symbol to find within the file (optional if line/character are provided)."
     )]
     symbol_name: Option<String>,
 }
@@ -148,7 +148,7 @@ impl McpToolboxService {
 #[tool(tool_box)]
 impl McpToolboxService {
     #[tool(
-        description = "Manages projects: lists, loads from path, sets active by name, or removes by name. All other tools operate on the active project. When a project is activated (loaded or selected), returns a snapshot including file tree and initial diagnostics summary, plus workspace status and next step guidance."
+        description = "Manages Rust projects in the workspace: loads new projects from filesystem paths, switches between existing projects, removes projects, or lists all loaded projects. All other tools operate exclusively on the currently active project. When a project is activated (loaded or selected), returns a comprehensive snapshot including project file tree, initial cargo check diagnostics summary, workspace status, and next step guidance for efficient workflow."
     )]
     async fn manage_projects(
         &self,
@@ -162,7 +162,7 @@ impl McpToolboxService {
     }
 
     #[tool(
-        description = "Runs `cargo check` on the active project. Returns a JSON list of current errors and warnings, optionally filtered by file and limited. This must be run before `get_code_actions`. All line/column numbers are 0-based."
+        description = "Executes `cargo check` on the active Rust project to detect compilation errors and warnings. Returns a comprehensive JSON list of diagnostics with file paths, line/character positions (0-based), severity levels, and detailed error messages. Supports optional filtering by specific file path and result limiting. This tool must be run before `get_code_actions` to populate the diagnostic cache. Invalidates all previously cached fix IDs when executed."
     )]
     async fn list_diagnostics(
         &self,
@@ -176,7 +176,7 @@ impl McpToolboxService {
     }
 
     #[tool(
-        description = "Retrieves available automatic fixes for a specific diagnostic. Requires the exact file_path and message from a diagnostic returned by `list_diagnostics`. Returns a JSON list of actions, each with an `id`, description, and diff preview."
+        description = "Retrieves available automatic code fixes for a specific compilation diagnostic identified by `list_diagnostics`. Requires the exact file_path and diagnostic_message string as returned by the most recent `list_diagnostics` call. Returns a JSON list of available fix actions, each containing a unique `id` for application, human-readable description of the fix, and a detailed diff preview showing the proposed code changes. Essential for automated code repair workflow."
     )]
     async fn get_code_actions(
         &self,
@@ -184,13 +184,13 @@ impl McpToolboxService {
     ) -> Result<CallToolResult, McpError> {
         to_mcp_result(|| {
             self.toolbox
-                .get_code_actions(req.file_path, req.diagnostic_message)
+                .get_code_actions(req.file_path, Some(req.diagnostic_message), None, None)
         })
         .await
     }
 
     #[tool(
-        description = "Applies an automatic fix identified by `get_code_actions`. Requires the `fix_id`. Applying any fix invalidates all other cached fix_ids and diagnostics for the project; you must run `list_diagnostics` again afterwards."
+        description = "Applies an automatic code fix using the fix_id obtained from `get_code_actions`. Modifies source files on disk and notifies the internal LSP server of changes. CRITICAL: Applying any fix invalidates ALL cached fix_ids and diagnostic cache for the entire project. You MUST run `list_diagnostics` again after applying any fix to refresh the cache and obtain updated diagnostic information."
     )]
     async fn apply_fix(
         &self,
@@ -200,14 +200,14 @@ impl McpToolboxService {
     }
 
     #[tool(
-        description = "Lists the file and directory structure of the active project, respecting .gitignore. Returns a text-based tree. Does not read file content."
+        description = "Generates a comprehensive file and directory tree structure of the active Rust project, automatically respecting .gitignore rules and common ignore patterns. Returns a human-readable text-based tree representation showing the project's organization. Useful for understanding project layout and navigation. Does not read or return actual file contents - use client-side I/O for file reading."
     )]
     async fn get_file_tree(&self) -> Result<CallToolResult, McpError> {
         to_mcp_result(|| self.toolbox.get_file_tree()).await
     }
 
     #[tool(
-        description = "Lists all high-level code symbols (structs, functions, traits, etc.) found in the specified file. Returns a JSON list. All line/column numbers are 0-based."
+        description = "Analyzes and lists all high-level code symbols (structs, functions, traits, enums, modules, etc.) found in the specified Rust source file. Returns a detailed JSON list containing symbol names, types, locations with 0-based line/character positions, and hierarchical relationships. Essential for code navigation and understanding file structure before making modifications."
     )]
     async fn list_document_symbols(
         &self,
@@ -217,7 +217,7 @@ impl McpToolboxService {
     }
 
     #[tool(
-        description = "Provides detailed information (documentation, signature, definition structure, methods, fields) for the code symbol. Provide file_path AND EITHER line/column (0-based) OR symbol_name. Returns markdown."
+        description = "Provides comprehensive information about a specific code symbol including documentation, function signatures, struct/enum definitions, available methods, fields, and implementation details. Requires file_path AND EITHER precise line/character coordinates (0-based) OR symbol_name for lookup. Returns rich markdown-formatted documentation ideal for understanding APIs and code structure before modification."
     )]
     async fn get_symbol_info(
         &self,
@@ -225,13 +225,13 @@ impl McpToolboxService {
     ) -> Result<CallToolResult, McpError> {
         to_mcp_result(|| {
             self.toolbox
-                .get_symbol_info(req.file_path, req.line, req.column, req.symbol_name)
+                .get_symbol_info(req.file_path, req.line, req.character, req.symbol_name)
         })
         .await
     }
 
     #[tool(
-        description = "Searches the entire active project workspace for symbols matching the query string. Returns a JSON list. All line/column numbers are 0-based."
+        description = "Performs a comprehensive search across the entire active Rust project workspace for symbols (functions, structs, traits, etc.) matching the provided query string. Uses fuzzy matching to find relevant symbols even with partial names. Returns a JSON list of matching symbols with their locations (0-based line/character), file paths, and symbol types. Ideal for discovering APIs and understanding codebase structure."
     )]
     async fn search_workspace_symbols(
         &self,
@@ -241,7 +241,7 @@ impl McpToolboxService {
     }
 
     #[tool(
-        description = "Runs `cargo test` on the active project. Can optionally filter tests by name. Returns the raw test output and guidance."
+        description = "Executes `cargo test` on the active Rust project to run the test suite and verify code correctness. Supports optional filtering by test name or pattern to run specific tests. Returns raw test output including pass/fail status, test timing, and detailed failure information. CRITICAL: Running tests invalidates ALL cached fix_ids and diagnostic cache. Essential for verification after applying fixes or code changes."
     )]
     async fn test_project(
         &self,
@@ -251,28 +251,76 @@ impl McpToolboxService {
     }
 }
 
-const INSTRUCTIONS: &str = r#"
-This server provides 9 tools for agentic interaction with Rust projects.
-All file paths are relative to the active project root. All line and column numbers are 0-based.
-Your environment (the client) is responsible for reading/writing file content, except when using `apply_fix`.
-Standard Workflow:
-1.  `manage_projects`: Load a project path or select an existing one. Receive initial status, file tree, and diagnostic summary.
-2.  `list_diagnostics`: Get full, up-to-date JSON list of errors/warnings. Run this before `get_code_actions`.
-3.  Investigation:
-    - `get_file_tree`: Review project structure.
-    - `list_document_symbols`: Get symbols within one file (JSON).
-    - `search_workspace_symbols`: Find symbols across the project (JSON).
-    - `get_symbol_info`: Get details (docs, signature, definition) for a symbol. Provide `file_path` AND EITHER `line`/`column` (of usage or definition) OR `symbol_name` (definition must be in `file_path`) (Markdown).
-    - Use client-side I/O to read file contents.
-4.  Fixing:
-    - `get_code_actions`: Get available auto-fixes (JSON with `id` and `diff`) for a specific diagnostic (requires exact `file_path` and `message` from `list_diagnostics`).
-    - `apply_fix`: Apply an auto-fix using its `id`. This modifies files on disk and invalidates all cached diagnostics and fixes.
-    - If no auto-fix, use client-side I/O to write manual code changes.
-5.  Verification:
-     - After any fix (auto or manual), run `list_diagnostics` again.
-     - `test_project`: Run tests to verify fixes and check for regressions.
-Always follow the 'Next Step' guidance provided in each tool's response.
-"#;
+const INSTRUCTIONS: &str = r###"
+# CRAMP MCP Server - Rust Project Analysis & Repair Tools
+
+This server provides 9 specialized tools for intelligent interaction with Rust projects, enabling automated analysis, diagnosis, and repair of code issues.
+
+## Core Principles
+- **Active Project Context**: All tools (except `manage_projects`) operate exclusively on the currently active project
+- **0-Based Indexing**: All line and character numbers are 0-based throughout the system
+- **Relative Paths**: All file paths are relative to the active project root directory
+- **Cache Management**: Critical state invalidation rules must be followed for correct operation
+- **Client I/O Responsibility**: Your environment handles file reading/writing (except `apply_fix`)
+
+## Essential Workflow (MUST Follow)
+
+### 1. Project Setup
+- **`manage_projects`**: Load project from filesystem path or switch between existing projects
+- Returns comprehensive snapshot: file tree, initial diagnostics, workspace status, next steps
+
+### 2. Diagnosis Phase
+- **`list_diagnostics`**: Execute `cargo check` to detect compilation errors/warnings
+- CRITICAL: Must run before `get_code_actions` - populates diagnostic cache
+- CRITICAL: Invalidates ALL previously cached fix IDs when executed
+
+### 3. Investigation & Analysis
+- **`get_file_tree`**: Understand project structure and organization
+- **`list_document_symbols`**: Analyze symbols within specific files (JSON output)
+- **`search_workspace_symbols`**: Find symbols across entire project with fuzzy matching
+- **`get_symbol_info`**: Get detailed API documentation and signatures (Markdown output)
+  - Requires: `file_path` AND EITHER `line`/`character` (0-based) OR `symbol_name`
+- **Client-side file reading**: Use your environment to read source code content
+
+### 4. Automated Repair
+- **`get_code_actions`**: Retrieve available automatic fixes for specific diagnostics
+  - Requires EXACT `file_path` and `diagnostic_message` from most recent `list_diagnostics`
+  - Returns fix actions with unique `id`, description, and diff preview
+- **`apply_fix`**: Apply automatic fix using fix_id from `get_code_actions`
+  - CRITICAL: Invalidates ALL fix IDs and diagnostic cache for entire project
+  - CRITICAL: MUST run `list_diagnostics` again after applying any fix
+
+### 5. Manual Repair (when auto-fix unavailable)
+- Use investigation tools to understand the issue
+- Apply manual code changes via client-side I/O
+- CRITICAL: Manual edits make server cache stale - MUST run `list_diagnostics` afterward
+
+### 6. Verification
+- **`list_diagnostics`**: Verify compilation errors are resolved
+- **`test_project`**: Run test suite to ensure correctness and catch regressions
+  - CRITICAL: Running tests invalidates ALL fix IDs and diagnostic cache
+  - Supports filtering by test name/pattern for targeted testing
+
+## Critical Cache Invalidation Rules
+
+**Operations that invalidate fix IDs and diagnostic cache:**
+- Running `list_diagnostics`
+- Applying fixes with `apply_fix`
+- Running tests with `test_project`
+- Any manual client-side file modifications
+
+**After invalidation, you MUST:**
+- Re-run `list_diagnostics` to refresh diagnostic cache
+- Obtain new fix IDs from `get_code_actions` if needed
+
+## Success Criteria
+Task completion requires:
+1. `list_diagnostics` reports no compilation errors
+2. `test_project` shows all tests passing
+3. No regressions introduced
+
+**Always follow the 'Next Step' guidance provided in each tool's response for optimal workflow efficiency.**
+"###;
 
 #[tool(tool_box)]
 impl ServerHandler for McpToolboxService {

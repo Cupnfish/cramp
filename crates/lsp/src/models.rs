@@ -8,7 +8,25 @@ use std::path::PathBuf;
 )]
 pub struct Position {
     pub line: u32,
-    pub column: u32,
+    pub character: u32,
+}
+
+impl Into<lsp_types::Position> for Position {
+    fn into(self) -> lsp_types::Position {
+        lsp_types::Position {
+            line: self.line,
+            character: self.character,
+        }
+    }
+}
+
+impl From<lsp_types::Position> for Position {
+    fn from(value: lsp_types::Position) -> Self {
+        Self {
+            line: value.line,
+            character: value.character,
+        }
+    }
 }
 
 #[derive(
@@ -17,6 +35,24 @@ pub struct Position {
 pub struct Range {
     pub start: Position,
     pub end: Position,
+}
+
+impl Into<lsp_types::Range> for Range {
+    fn into(self) -> lsp_types::Range {
+        lsp_types::Range {
+            start: self.start.into(),
+            end: self.end.into(),
+        }
+    }
+}
+
+impl From<lsp_types::Range> for Range {
+    fn from(value: lsp_types::Range) -> Self {
+        Self {
+            start: value.start.into(),
+            end: value.end.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash, PartialOrd, Ord, Default)]
@@ -56,7 +92,7 @@ pub struct SimpleDiagnostic {
     pub message: String,
     pub file_path: String, // Relative
     pub line: u32,         // 0-based
-    pub column: u32,       // 0-based
+    pub character: u32,    // 0-based
 }
 
 // --- Internal Code Actions ---
@@ -105,7 +141,7 @@ pub struct FlatSymbol {
     pub kind: String,      // "struct" | "trait" | "function" etc
     pub file_path: String, // Relative
     pub line: u32,         // 0-based
-    pub column: u32,       // 0-based
+    pub character: u32,    // 0-based
 }
 
 // --- Internal API Extraction (0-based) ---

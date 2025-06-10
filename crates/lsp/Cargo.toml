@@ -20,7 +20,7 @@ env_logger.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 
-dashmap.workspace = true                                   # Concurrent HashMap
+dashmap = { workspace = true, features = ["rayon"] }                                   # Concurrent HashMap
 once_cell.workspace = true
 uuid = { workspace = true, features = ["v4", "fast-rng"] } # For Fix IDs
 
@@ -38,3 +38,5 @@ similar = { workspace = true, features = ["inline"] } # Diff generation
 itertools.workspace = true
 
 bytes.workspace = true # For codec
+rayon.workspace = true # For CPU parallelism
+strsim.workspace = true # For fuzzy string matching

@@ -4,7 +4,7 @@ use crate::fs_utils::*;
 use crate::models::*;
 use crate::server::RaServer;
 use dashmap::DashMap;
-use itertools::Itertools;
+
 use log::{debug, error, info, warn};
 // *** Add find_symbol_by_name_in_hierarchy import
 use lsp_types::{
@@ -12,18 +12,27 @@ use lsp_types::{
 };
 use path_clean::PathClean;
 use pathdiff::diff_paths;
+use rayon::iter::IndexedParallelIterator as _;
+use rayon::iter::IntoParallelRefIterator as _;
+use rayon::iter::ParallelIterator as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use strsim::jaro_winkler;
 use tokio::sync::RwLock;
+use tokio::task::spawn_blocking;
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
-const MAX_INITIAL_DIAGNOSTICS: usize = 3;
-const DEFAULT_FILE_TREE_MAX_ITEMS: usize = 100;
-const DEFAULT_FILE_TREE_MAX_DEPTH: usize = 5;
+const MAX_INITIAL_DIAGNOSTICS: usize = 5; // Show a few more
+const DEFAULT_FILE_TREE_MAX_ITEMS: usize = 150; // Increase limit slightly
+const DEFAULT_FILE_TREE_MAX_DEPTH: usize = 4; // Reduce depth for performance
+
+// Fuzzy matching optimization constants
+const SIMILARITY_THRESHOLD: f64 = 0.8; // Early exit threshold for good matches
+const MAX_FUZZY_CANDIDATES: usize = 50; // Limit search scope to avoid excessive computation
 
 /// The core orchestrator implementing the MCP tools.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Toolbox {
     servers: DashMap<String, Arc<RaServer>>,
     active_project: RwLock<Option<String>>,
@@ -35,6 +44,11 @@ pub struct Toolbox {
     shutdown_timeout: Duration,
     initial_wait: Duration,
 }
+impl Default for Toolbox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Toolbox {
     pub fn new() -> Self {
@@ -43,9 +57,9 @@ impl Toolbox {
             active_project: RwLock::new(None),
             fix_cache: Arc::new(DashMap::new()),
             diagnostics_cache: Arc::new(DashMap::new()),
-            request_timeout: Duration::from_secs(210), // Default: 210s (was 90s + 2min)
-            shutdown_timeout: Duration::from_secs(130), // Default: 130s (was 10s + 2min)
-            initial_wait: Duration::from_secs(125),    // Default: 125s (was 5s + 2min)
+            request_timeout: Duration::from_secs(120),
+            shutdown_timeout: Duration::from_secs(30),
+            initial_wait: Duration::from_secs(90),
         }
     }
 
@@ -55,9 +69,9 @@ impl Toolbox {
             active_project: RwLock::new(None),
             fix_cache: Arc::new(DashMap::new()),
             diagnostics_cache: Arc::new(DashMap::new()),
-            request_timeout: Duration::from_secs(request_timeout),
-            shutdown_timeout: Duration::from_secs(shutdown_timeout),
-            initial_wait: Duration::from_secs(initial_wait),
+            request_timeout: Duration::from_secs(request_timeout).max(Duration::from_secs(10)),
+            shutdown_timeout: Duration::from_secs(shutdown_timeout).max(Duration::from_secs(5)),
+            initial_wait: Duration::from_secs(initial_wait).max(Duration::from_secs(5)),
         }
     }
 
@@ -68,10 +82,16 @@ impl Toolbox {
 
     /// Add a new server to the servers map
     pub async fn add_server(&self, name: String, path: PathBuf) -> ToolResult<String> {
+        // Check before starting the potentially long server process
         if self.servers.contains_key(&name) {
-            return Err(ToolboxError::Other(format!("Project '{}' already exists", name)));
+            return Err(ToolboxError::ProjectAlreadyExists(name));
         }
-        
+        // Validate path first
+        if !path.join("Cargo.toml").exists() {
+            return Err(ToolboxError::NotACargoProject(path));
+        }
+
+        info!("Starting server for '{}' at {:?}", name, path);
         let server = RaServer::start_with_timeouts(
             &path,
             name.clone(),
@@ -81,23 +101,32 @@ impl Toolbox {
         )
         .await
         .map_err(ToolboxError::ServerError)?;
-        
+
+        // Ensure server is ready before adding
+        server.wait_ready().await;
         self.servers.insert(name.clone(), server);
-        Ok(format!("Successfully added project '{}'", name))
+        info!("Server for '{}' added and ready.", name);
+        Ok(format!(
+            "Successfully added and initialized project '{}'",
+            name
+        ))
     }
 
     /// Remove a server from the servers map
     pub async fn remove_server(&self, name: &str) -> ToolResult<String> {
+        // Remove first to prevent new requests
         if let Some((_, server)) = self.servers.remove(name) {
+            info!("Shutting down server for '{}'", name);
             server.shutdown().await.map_err(ToolboxError::ServerError)?;
             self.clear_all_cache_for_project(name);
-            
+
             // Clear active project if it was the removed one
             let mut active = self.active_project.write().await;
             if active.as_ref() == Some(&name.to_string()) {
+                info!("Clearing active project as '{}' was removed.", name);
                 *active = None;
             }
-            
+            info!("Server for '{}' removed.", name);
             Ok(format!("Successfully removed project '{}'", name))
         } else {
             Err(ToolboxError::ProjectNotFound(name.to_string()))
@@ -106,12 +135,23 @@ impl Toolbox {
 
     /// Set the active project
     pub async fn set_active_project(&self, name: &str) -> ToolResult<String> {
-        if !self.servers.contains_key(name) {
-            return Err(ToolboxError::ProjectNotFound(name.to_string()));
-        }
-        
+        // Get server to ensure it exists and wait for it to be ready
+        let server = self
+            .servers
+            .get(name)
+            .ok_or_else(|| ToolboxError::ProjectNotFound(name.to_string()))?
+            .clone();
+
+        info!(
+            "Waiting for server '{}' to be ready before setting active...",
+            name
+        );
+        server.wait_ready().await; // Ensure server is ready
+
         *self.active_project.write().await = Some(name.to_string());
+        // Clear cache when switching projects
         self.clear_all_cache_for_project(name);
+        info!("Active project set to '{}'.", name);
         Ok(format!("Successfully set active project to '{}'", name))
     }
 
@@ -119,26 +159,37 @@ impl Toolbox {
     pub async fn list_projects(&self) -> ToolResult<String> {
         let active = self.active_project.read().await;
         let mut result = String::new();
-        
+
         if self.servers.is_empty() {
             result.push_str("No projects loaded.\n");
         } else {
             result.push_str("Loaded projects:\n");
-            for entry in self.servers.iter() {
+            // Sort keys for consistent output
+            let mut entries: Vec<_> = self.servers.iter().collect();
+            entries.sort_by_key(|e| e.key().clone());
+
+            for entry in entries {
                 let name = entry.key();
                 let server = entry.value();
                 let is_active = active.as_ref() == Some(name);
                 let status = if is_active { " (active)" } else { "" };
-                result.push_str(&format!("  - {}: {}{}\n", name, server.root_path().display(), status));
+                result.push_str(&format!(
+                    "  - {}: {}{}\n",
+                    name,
+                    server.root_path().display(),
+                    status
+                ));
             }
         }
-        
+
         if let Some(active_name) = active.as_ref() {
             result.push_str(&format!("\nActive project: {}\n", active_name));
         } else {
-            result.push_str("\nNo active project set.\n");
+            result.push_str(
+                "\nNo active project set. Use `manage_projects` or `set_active_project`.\n",
+            );
         }
-        
+
         Ok(result)
     }
     // --- Internal Helpers ---
@@ -151,13 +202,20 @@ impl Toolbox {
             .get(name)
             .map(|r| r.value().clone())
             .ok_or_else(|| {
-                error!("Active project '{}' not found in server map!", name);
+                // This should ideally not happen if manage_projects is used correctly
+                error!(
+                    "Consistency error: Active project '{}' not found in server map!",
+                    name
+                );
                 ToolboxError::ProjectNotFound(name.clone())
             })?;
+        // <<< PERFORMANCE: Ensure server is ready before returning it for operations
+        server.wait_ready().await;
         Ok((name.clone(), server))
     }
 
     fn get_relative_path(&self, server: &RaServer, absolute_path: &Path) -> String {
+        // This is CPU-bound, but usually fast
         diff_paths(absolute_path, server.root_path())
             .unwrap_or_else(|| absolute_path.to_path_buf()) // Fallback
             .display()
@@ -169,25 +227,55 @@ impl Toolbox {
         relative_path_str: &str,
     ) -> ToolResult<(Arc<RaServer>, PathBuf, String)> {
         let (_, server) = self.get_active_server().await?;
+        // clean is not blocking
         let root = server.root_path().clean();
         let proposed_path = root.join(relative_path_str).clean();
 
+        let path_exists = tokio::fs::try_exists(&proposed_path).await.unwrap_or(false);
+        let absolute = if path_exists {
+            tokio::fs::canonicalize(&proposed_path)
+                .await
+                .unwrap_or_else(|_| proposed_path.clone())
+        } else {
+            proposed_path.clone()
+        };
+
         // Security & Correctness: Must exist and be strictly within project root
-        if !proposed_path.exists() || !proposed_path.starts_with(&root) {
+        // Use absolute path for starts_with check after canonicalization
+        if !path_exists || !absolute.starts_with(&root) {
             warn!(
-                "Invalid or out-of-bounds path access attempt: root={:?}, requested='{}', resolved={:?}",
-                root, relative_path_str, proposed_path
+                "Invalid, non-existent or out-of-bounds path access attempt: root={:?}, requested='{}', resolved={:?}",
+                root, relative_path_str, absolute
             );
             return Err(ToolboxError::InvalidPath(PathBuf::from(relative_path_str)));
         }
-        let absolute = proposed_path.canonicalize().unwrap_or(proposed_path);
+        // Return the potentially canonicalized path
         Ok((server, absolute, relative_path_str.to_string()))
     }
 
     // Clears both fix and diagnostic cache for a project.
+    // This is fast, no need for spawn_blocking
     fn clear_all_cache_for_project(&self, project_name: &str) {
         let initial_fix_count = self.fix_cache.len();
-        self.fix_cache.retain(|_, v| v.project_name != project_name);
+
+        // Optimized batch removal for fix cache
+        let keys_to_remove: Vec<_> = self
+            .fix_cache
+            .par_iter()
+            .filter_map(|entry| {
+                if entry.value().project_name == project_name {
+                    Some(entry.key().clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Remove collected keys
+        for key in keys_to_remove {
+            self.fix_cache.remove(&key);
+        }
+
         let final_fix_count = self.fix_cache.len();
         if initial_fix_count > final_fix_count {
             debug!(
@@ -196,9 +284,11 @@ impl Toolbox {
                 project_name
             );
         }
+
+        // Direct removal for diagnostics cache
         if self.diagnostics_cache.remove(project_name).is_some() {
             debug!("Cleared cached diagnostics for project '{}'", project_name);
-        };
+        }
     }
 
     // Helper to run cargo check and update cache
@@ -207,21 +297,23 @@ impl Toolbox {
         name: &str,
         server: Arc<RaServer>,
     ) -> ToolResult<Vec<MyDiagnostic>> {
-        info!("[{}] Running cargo check...", name);
+        info!("[{}] Running external cargo check...", name);
         // Clear fixes, as new diagnostics invalidate old fixes
-        self.fix_cache.retain(|_, v| v.project_name != name);
+        self.clear_all_cache_for_project(name);
 
+        // <<< PERFORMANCE: MUST use spawn_blocking for external process
         let diags_0based: Vec<MyDiagnostic> =
-            tokio::task::spawn_blocking(move || server.get_cargo_check_diagnostics())
+            spawn_blocking(move || server.get_cargo_check_diagnostics())
                 .await
-                .map_err(ToolboxError::TaskJoin)?
-                .map_err(ToolboxError::ServerError)?;
+                .map_err(ToolboxError::TaskJoin)? // Handle JoinError
+                .map_err(ToolboxError::ServerError)?; // Handle RaError
 
         info!(
-            "[{}] Cargo check found {} diagnostics.",
+            "[{}] Cargo check found {} unique diagnostics.",
             name,
             diags_0based.len()
         );
+        // Cache the results
         self.diagnostics_cache
             .insert(name.to_string(), diags_0based.clone());
         Ok(diags_0based)
@@ -232,63 +324,50 @@ impl Toolbox {
     // =======================================
 
     // --- Tool 1: manage_projects ---
+    // DEPRECATED: Use add_server, remove_server, set_active_project, list_projects instead
+    // Kept for compatibility but simplified
     pub async fn manage_projects(
         &self,
         path_or_name: Option<String>,
         remove_name: Option<String>,
     ) -> ToolResult<String> {
+        warn!("manage_projects is deprecated. Use add/remove/set_active/list_projects.");
         let mut report = Vec::new();
         let mut next_step = "Review the workspace status.";
-        let mut activated_project: Option<(String, Arc<RaServer>)> = None;
+        let mut activated_project_info: Option<(String, Arc<RaServer>)> = None;
 
-        // Handle removal first
+        // Handle removal
         if let Some(to_remove) = remove_name {
-            if let Some((_, server_to_remove)) = self.servers.remove(&to_remove) {
-                info!("Shutting down and removing project: {}", to_remove);
-                report.push(format!("Info: Shutting down project '{}'...", to_remove));
-                server_to_remove
-                    .shutdown()
-                    .await
-                    .map_err(ToolboxError::ServerError)?;
-                report.push(format!("Success: Removed project '{}'.", to_remove));
-                self.clear_all_cache_for_project(&to_remove);
-                let mut active = self.active_project.write().await;
-                if active.as_ref() == Some(&to_remove) {
-                    info!(
-                        "Clearing active project status as '{}' was removed.",
-                        to_remove
-                    );
-                    *active = None;
-                }
-            } else {
-                warn!("Project '{}' not found for removal.", to_remove);
-                report.push(format!(
-                    "Warning: Project '{}' not found for removal.",
-                    to_remove
-                ));
+            match self.remove_server(&to_remove).await {
+                Ok(msg) => report.push(msg),
+                Err(e) => report.push(format!("Error removing: {}", e)),
             }
         }
 
         // Handle add/select
         if let Some(input) = path_or_name {
-            if let Some(server_ref) = self.servers.get(&input) {
-                // Input matches an existing project name: SELECT it
-                info!("Setting active project to existing: '{}'", input);
-                let server = server_ref.value().clone();
-                *self.active_project.write().await = Some(input.clone());
-                report.push(format!("Success: Set active project to '{}'.", input));
-                activated_project = Some((input.clone(), server));
-                // Always clear cache when switching context
-                self.clear_all_cache_for_project(&input);
+            // Try selecting first
+            if self.servers.contains_key(&input) {
+                match self.set_active_project(&input).await {
+                    Ok(msg) => {
+                        report.push(msg);
+                        if let Some(server) = self.servers.get(&input) {
+                            activated_project_info = Some((input.clone(), server.clone()));
+                        }
+                    }
+                    Err(e) => report.push(format!("Error setting active: {}", e)),
+                }
             } else {
-                // Input is not a known name: Assume it's a PATH and try LOADING
+                // Assume it's a path
                 let path = PathBuf::from(&input).clean();
-                if !path.exists() {
-                    error!("Path does not exist: {:?}", path);
+                // <<< PERFORMANCE: use async fs
+                if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
                     return Err(ToolboxError::InvalidPath(path));
                 }
-                if !path.join("Cargo.toml").exists() {
-                    error!("Path is not a cargo project: {:?}", path);
+                if !tokio::fs::try_exists(path.join("Cargo.toml"))
+                    .await
+                    .unwrap_or(false)
+                {
                     return Err(ToolboxError::NotACargoProject(path));
                 }
                 let name = path
@@ -297,81 +376,78 @@ impl Toolbox {
                     .unwrap_or("unnamed_project")
                     .to_string();
 
-                // If project with this name (derived from path) already exists,
-                // treat it as a selection of an existing project by its path's derived name.
-                if let Some(existing_server_ref) = self.servers.get(&name) {
-                    info!(
-                        "Project with name '{}' (derived from path {:?}) already exists. Selecting it.",
-                        name, path
-                    );
-                    let server = existing_server_ref.value().clone();
-                    *self.active_project.write().await = Some(name.clone());
+                // Check if name derived from path already exists
+                if self.servers.contains_key(&name) {
                     report.push(format!(
-                        "Info: Project '{}' already loaded. Set as active project.",
+                        "Project with name '{}' derived from path already exists. Setting active.",
                         name
                     ));
-                    activated_project = Some((name.clone(), server));
-                    self.clear_all_cache_for_project(&name); // Clear cache on selection
+                    match self.set_active_project(&name).await {
+                        Ok(msg) => {
+                            report.push(msg);
+                            if let Some(server) = self.servers.get(&name) {
+                                activated_project_info = Some((name.clone(), server.clone()));
+                            }
+                        }
+                        Err(e) => report.push(format!("Error setting active: {}", e)),
+                    }
                 } else {
-                    info!("Loading new project '{}' from path: {:?}", name, path);
+                    // Add new project
                     report.push(format!(
-                        "Info: Loading project '{}' from {:?}...",
+                        "Info: Loading project '{}' from {:?}. Initial indexing may take time...",
                         name, path
                     ));
-                    report.push(
-                        "Info: Initial project indexing may take a few moments...".to_string(),
-                    );
-                    let server_start_time = std::time::Instant::now();
-                    let server = RaServer::start_with_timeouts(
-                        &path,
-                        name.clone(),
-                        self.request_timeout,
-                        self.shutdown_timeout,
-                        self.initial_wait,
-                    )
-                    .await
-                    .map_err(ToolboxError::ServerError)?;
-                    let server_load_duration = server_start_time.elapsed();
-                    report.push(format!(
-                        "Info: Project '{}' indexed in {:.2?}.",
-                        name, server_load_duration
-                    ));
-
-                    self.servers.insert(name.clone(), server.clone());
-                    *self.active_project.write().await = Some(name.clone()); // Set as active
-                    report.push(format!(
-                        "Success: Loaded and set active project to '{}'.",
-                        name
-                    ));
-                    activated_project = Some((name.clone(), server));
-                    self.clear_all_cache_for_project(&name);
+                    match self.add_server(name.clone(), path).await {
+                        Ok(msg) => {
+                            report.push(msg);
+                            // Set it as active after adding
+                            match self.set_active_project(&name).await {
+                                Ok(msg_set) => {
+                                    report.push(msg_set);
+                                    if let Some(server) = self.servers.get(&name) {
+                                        activated_project_info =
+                                            Some((name.clone(), server.clone()));
+                                    }
+                                }
+                                Err(e) => {
+                                    report.push(format!("Error setting active after add: {}", e))
+                                }
+                            }
+                        }
+                        Err(e) => report.push(format!("Error adding project: {}", e)),
+                    }
                 }
             }
         }
 
         // --- Generate Snapshot for newly activated project ---
         let mut has_diagnostics = false;
-        if let Some((name, server)) = activated_project {
+        // Run snapshot only if a project was newly activated or selected
+        if let Some((name, server)) = activated_project_info {
+            // Ensure server is ready before snapshot
+            server.wait_ready().await;
             report.push("\n### Project Snapshot".to_string());
             // 1. File Tree
             report.push("--- File Tree ---".to_string());
             let root = server.root_path().to_path_buf();
-            let tree_result = tokio::task::spawn_blocking(move || {
+            // <<< PERFORMANCE: MUST use spawn_blocking
+            let tree_result = spawn_blocking(move || {
                 get_file_tree_string(
                     &root,
                     Some(DEFAULT_FILE_TREE_MAX_ITEMS),
                     Some(DEFAULT_FILE_TREE_MAX_DEPTH),
                 )
             })
-            .await;
+            .await; // Await JoinHandle
             match tree_result {
                 Ok(Ok(tree)) => report.push(tree),
                 Ok(Err(e)) => report.push(format!("Error generating file tree: {}", e)),
-                Err(e) => report.push(format!("Error generating file tree (task): {}", e)),
+                Err(e) => report.push(format!("Error generating file tree (task join): {}", e)),
             }
 
             // 2. Initial Diagnostics
             report.push("\n--- Initial Diagnostics Summary ---".to_string());
+            // <<< PERFORMANCE: run_check_and_cache uses spawn_blocking internally
             match self.run_check_and_cache(&name, server.clone()).await {
                 Ok(diags) => {
                     let error_and_warnings: Vec<_> = diags
@@ -380,7 +456,10 @@ impl Toolbox {
                         .collect();
                     let count = error_and_warnings.len();
                     has_diagnostics = count > 0;
-                    report.push(format!("Total errors and warnings: {}", count));
+                    report.push(format!(
+                        "Total errors and warnings found by `cargo check`: {}",
+                        count
+                    ));
                     if count > 0 {
                         report.push(format!(
                             "Showing first {}:",
@@ -391,11 +470,16 @@ impl Toolbox {
                             report.push(format!(
                                 "- {}:{}:{}: [{}] {}",
                                 rel_path,
-                                diag.location.range.start.line,
-                                diag.location.range.start.column,
+                                // Display 1-based for user friendliness
+                                diag.location.range.start.line + 1,
+                                diag.location.range.start.character + 1,
                                 diag.severity,
                                 diag.message.lines().next().unwrap_or("").trim() // first line only
                             ));
+                        }
+                        if count > MAX_INITIAL_DIAGNOSTICS {
+                            report
+                                .push(format!("... and {} more.", count - MAX_INITIAL_DIAGNOSTICS));
                         }
                     }
                 }
@@ -403,38 +487,34 @@ impl Toolbox {
             }
             // Set guidance based on activation
             next_step = if has_diagnostics {
-                "Analyze the file tree and initial diagnostics. Use `list_diagnostics` for full details, `get_symbol_info` to understand code, or `get_code_actions` to find fixes."
+                "Analyze the file tree and initial diagnostics. Use `list_diagnostics` (which will use cache) for full details, `get_symbol_info` to understand code, or `get_code_actions` to find fixes."
             } else {
-                "Project loaded with no initial errors. Use `test_project` to run tests, or `list_document_symbols`/`search_workspace_symbols` to explore the code."
+                "Project loaded with no initial `cargo check` errors. Use `test_project` to run tests, or `list_document_symbols`/`search_workspace_symbols` to explore the code."
             };
         }
 
         // --- Generate Final Status Report ---
-        let active = self.active_project.read().await;
-        let active_name = active.as_deref();
         report.push("\n### Workspace Status".to_string());
-        if self.servers.is_empty() {
-            report.push("- (empty)".to_string());
-            next_step = "Use `manage_projects` with a path to load a project.";
-        } else {
-            for entry in self.servers.iter().sorted_by_key(|e| e.key().clone()) {
-                let status = if Some(entry.key().as_str()) == active_name {
-                    " (active)"
-                } else {
-                    ""
-                };
-                report.push(format!("- {}{}", entry.key(), status));
-            }
+        match self.list_projects().await {
+            Ok(list) => report.push(list),
+            Err(e) => report.push(format!("Error listing projects: {}", e)),
         }
-        if active_name.is_none() && !self.servers.is_empty() {
-            next_step = "Use `manage_projects` with a project name to select an active project.";
+
+        // Refine next_step if no project is active
+        let active = self.active_project.read().await;
+        if active.is_none() {
+            next_step = if self.servers.is_empty() {
+                "Use `manage_projects` or `add_server` with a path to load a project."
+            } else {
+                "Use `manage_projects` or `set_active_project` with a project name to select an active project."
+            };
         }
+
         report.push(format!("\n---\nNext Step: {}", next_step));
         Ok(report.join("\n"))
     }
 
     // --- Tool 2: list_diagnostics ---
-    // *** PERFORMANCE: Add force_recheck and caching logic ***
     pub async fn list_diagnostics(
         &self,
         file_path: Option<String>,
@@ -448,14 +528,17 @@ impl Toolbox {
             // Check cache first unless force is true
             if !force {
                 if let Some(cached) = self.diagnostics_cache.get(&name) {
-                    info!("[{}] Returning cached diagnostics ({}). Use force_recheck=true to update.", name, cached.len());
+                    info!("[{}] Returning {} cached diagnostics. Use force_recheck=true to update.", name, cached.len());
+                     // Clone the cached data
                     cached.value().clone()
                 } else {
-                    info!("[{}] No cache found, running check.", name);
+                    info!("[{}] No diagnostic cache found, running check.", name);
+                     // run_check_and_cache uses spawn_blocking
                     self.run_check_and_cache(&name, server.clone()).await?
                 }
             } else {
-                info!("[{}] Force re-check requested.", name);
+                info!("[{}] Force re-check requested for diagnostics.", name);
+                 // run_check_and_cache uses spawn_blocking
                 self.run_check_and_cache(&name, server.clone()).await?
             };
         // *********************************************************
@@ -466,39 +549,58 @@ impl Toolbox {
             None => None,
         };
 
-        let filtered_diags: Vec<SimpleDiagnostic> = all_diags
+        // Clone the necessary data before moving into spawn_blocking
+        let server_clone = server.clone();
+        // Pre-compute relative paths for all diagnostics to avoid using self in spawn_blocking
+        let diags_with_rel_paths: Vec<(MyDiagnostic, String)> = all_diags
             .iter()
-            .filter(|d| matches!(d.severity, MySeverity::Error | MySeverity::Warning))
-            .filter(|d| {
-                resolved_path
-                    .as_ref()
-                    .map_or(true, |rp| rp == &d.location.path)
-            })
-            .take(limit_usize)
-            .map(|diag| SimpleDiagnostic {
-                severity: diag.severity.to_string(),
-                message: diag.message.clone(),
-                file_path: self.get_relative_path(&server, &diag.location.path),
-                line: diag.location.range.start.line,
-                column: diag.location.range.start.column,
+            .map(|diag| {
+                let rel_path = self.get_relative_path(&server_clone, &diag.location.path);
+                (diag.clone(), rel_path)
             })
             .collect();
+
+        let filtered_diags: Vec<SimpleDiagnostic> = spawn_blocking(move || {
+            diags_with_rel_paths
+                .iter()
+                // Filter only errors and warnings first
+                .filter(|&(d, _)| matches!(d.severity, MySeverity::Error | MySeverity::Warning))
+                // Then filter by path if provided
+                .filter(|&(d, _)| {
+                    resolved_path
+                        .as_ref()
+                        .map_or(true, |rp| rp == &d.location.path)
+                })
+                .take(limit_usize)
+                .map(|(diag, rel_path)| SimpleDiagnostic {
+                    severity: diag.severity.to_string(),
+                    message: diag.message.clone(),
+                    // Use pre-computed relative path
+                    file_path: rel_path.clone(),
+                    // Display 1-based for user
+                    line: diag.location.range.start.line + 1,
+                    character: diag.location.range.start.character + 1,
+                })
+                .collect()
+        })
+        .await
+        .map_err(ToolboxError::TaskJoin)?;
 
         let json_output = serde_json::to_string_pretty(&filtered_diags)?;
         // Add cache info to guidance
         let cache_status = if !force && self.diagnostics_cache.contains_key(&name) {
-            "(cached)"
+            " (from cache)"
         } else {
-            "(live check)"
+            " (live check)"
         };
         let guidance = if filtered_diags.is_empty() {
             format!(
-                "No errors or warnings found {}. Next: Run `test_project` or explore symbols.",
+                "No errors or warnings found{}. Next: Run `test_project` or explore symbols.",
                 cache_status
             )
         } else {
             format!(
-                "Analyze the diagnostics {}. Next: Use `get_code_actions` with a file_path and message to find fixes, or `get_symbol_info` to understand the code at the error location. Use `force_recheck: true` to get fresh results.",
+                "Analyze the diagnostics{}. Next: Use `get_code_actions` with a file_path and message to find fixes, or `get_symbol_info` to understand the code at the error location. Use `force_recheck: true` to get fresh results.",
                 cache_status
             )
         };
@@ -515,72 +617,177 @@ Next Step: {}",
     pub async fn get_code_actions(
         &self,
         file_path: String,
-        diagnostic_message: String,
+        // Allow finding by line/col as alternative to message
+        diagnostic_message: Option<String>,
+        line: Option<u32>,
+        character: Option<u32>,
     ) -> ToolResult<String> {
         let (name, server) = self.get_active_server().await?;
         let (_, abs_path, _) = self.validate_and_resolve_path(&file_path).await?;
 
-        let cached_diags = self
-            .diagnostics_cache
-            .get(&name)
-            .ok_or_else(|| ToolboxError::CacheEmpty(name.clone()))?;
+        // Determine the range for the code action request
+        let target_range: crate::models::Range;
 
-        // Find the exact diagnostic in the cache
-        let target_diag = cached_diags
-            .iter()
-            .find(|d| d.location.path == abs_path && d.message == diagnostic_message)
-            .ok_or_else(|| {
-                ToolboxError::DiagnosticNotFound(file_path.clone(), diagnostic_message.clone())
-            })?;
+        if let Some(msg) = diagnostic_message {
+            // Find range from cached diagnostic message
+            let cached_diags = self
+                .diagnostics_cache
+                .get(&name)
+                .ok_or_else(|| ToolboxError::CacheEmpty(name.clone()))?;
 
-        info!(
-            "[{}] Querying code actions for diagnostic in {}",
-            name, file_path
-        );
-        let mut actions_with_ids = Vec::new();
+            // Try exact match first
+            let exact_match = cached_diags
+                .iter()
+                .find(|d| d.location.path == abs_path && d.message == msg);
 
-        // Query RA using the location from the cached diagnostic
+            let target_diag = match exact_match {
+                Some(diag) => diag,
+                None => {
+                    // Fuzzy matching: find most similar message
+                    let candidates: Vec<_> = cached_diags
+                        .par_iter()
+                        .filter(|d| d.location.path == abs_path)
+                        .collect();
+
+                    if candidates.is_empty() {
+                        return Err(ToolboxError::DiagnosticNotFound(
+                            file_path.clone(),
+                            msg.clone(),
+                        ));
+                    }
+
+                    // Calculate similarity scores and find best match with optimizations
+                    let first_candidate = candidates[0];
+                    let first_score = jaro_winkler(&first_candidate.message, &msg);
+
+                    let (best_match, best_score, searched_count) =
+                        if first_score >= SIMILARITY_THRESHOLD {
+                            // First candidate is good enough, use it directly
+                            (first_candidate, first_score, 1usize)
+                        } else {
+                            // Need to search more candidates using parallel processing
+                            let search_limit = candidates.len().min(MAX_FUZZY_CANDIDATES);
+
+                            let best_result = candidates
+                                .par_iter()
+                                .take(search_limit)
+                                .enumerate()
+                                .map(|(idx, candidate)| {
+                                    let score = jaro_winkler(&candidate.message, &msg);
+                                    (*candidate, score, idx + 1)
+                                })
+                                .reduce(
+                                    || (first_candidate, first_score, 1usize),
+                                    |acc, current| {
+                                        if current.1 > acc.1 { current } else { acc }
+                                    },
+                                );
+
+                            (best_result.0, best_result.1, search_limit)
+                        };
+
+                    // Log warning about fuzzy match
+                    warn!(
+                        "[{}] Using fuzzy match for diagnostic in {} (score={:.2}, searched {} candidates):\nRequested: '{}'\nFound:    '{}'",
+                        name, file_path, best_score, searched_count, msg, best_match.message
+                    );
+
+                    // Return fuzzy match result
+                    best_match
+                }
+            };
+
+            target_range = target_diag.location.range.into();
+            info!(
+                "[{}] Querying code actions for diagnostic in {}",
+                name, file_path
+            );
+        } else if let (Some(l), Some(c)) = (line, character) {
+            // Use provided line/col (0-based internally)
+            let pos = crate::models::Position {
+                line: l.saturating_sub(1),
+                character: c,
+            };
+            // Create a zero-width range at the position
+            target_range = crate::models::Range {
+                start: pos,
+                end: pos,
+            };
+            info!(
+                "[{}] Querying code actions for position {}:{} in {}",
+                name, l, c, file_path
+            );
+        } else {
+            return Err(ToolboxError::Other(
+                "Provide either 'diagnostic_message' OR 'line' and 'character' for get_code_actions."
+                    .into(),
+            ));
+        }
+
+        // Query RA using the location
+        // This is an async LSP request
         let actions = server
-            .get_code_actions(&target_diag.location.path, target_diag.location.range)
+            .get_code_actions(&abs_path, target_range)
             .await
             .map_err(ToolboxError::ServerError)?;
 
-        for action in actions {
-            if let Some(edit) = action.edit {
-                let fix_id = Uuid::new_v4().to_string();
-                let mut diff = "[Could not generate diff]".to_string();
-                if let Ok(file_edits) = workspace_edit_to_file_edits(&edit) {
-                    if let Some(first_edit) = file_edits.first() {
-                        // Read file content asynchronously for diff
-                        if let Ok(content) = tokio::fs::read_to_string(&first_edit.path).await {
-                            diff = generate_diff_preview(&content, &first_edit.edits);
+        let cache = self.fix_cache.clone();
+        let name_clone = name.clone();
+        let actions_with_ids: Vec<ActionWithId> = spawn_blocking(move || {
+            let mut results = Vec::new();
+            for action in actions {
+                // Check if the action actually has an edit we can apply
+                if let Some(edit) = action.edit {
+                    let fix_id = Uuid::new_v4().to_string();
+                    let mut diff = "[Could not generate diff]".to_string();
+                    // workspace_edit_to_file_edits can block on uri_to_path
+                    if let Ok(file_edits) = workspace_edit_to_file_edits(&edit) {
+                        if let Some(first_edit) = file_edits.first() {
+                            if let Ok(content) = std::fs::read_to_string(&first_edit.path) {
+                                diff = generate_diff_preview(&content, &first_edit.edits);
+                            } else {
+                                debug!(
+                                    "[{}] Could not read file {:?} for diff generation",
+                                    name_clone, first_edit.path
+                                );
+                            }
+                        } else if !edit.changes.as_ref().map_or(true, |c| c.is_empty())
+                            || !edit.document_changes.is_none()
+                        {
+                            diff = "[Edit applies to multiple files or uses resource operations]"
+                                .to_string();
                         } else {
-                            debug!(
-                                "[{}] Could not read file {:?} for diff generation",
-                                name, first_edit.path
-                            );
+                            diff = "[No file changes in this edit]".to_string();
                         }
                     }
+                    // Cache the edit for potential apply_fix call
+                    cache.insert(
+                        fix_id.clone(),
+                        CachedFix {
+                            project_name: name_clone.clone(),
+                            edit,
+                        },
+                    );
+                    results.push(ActionWithId {
+                        id: fix_id,
+                        description: action.title,
+                        diff,
+                    });
+                } else {
+                    debug!(
+                        "[{}] Skipping action without edit: {}",
+                        name_clone, action.title
+                    );
                 }
-                // Cache the edit for potential apply_fix call
-                self.fix_cache.insert(
-                    fix_id.clone(),
-                    CachedFix {
-                        project_name: name.clone(),
-                        edit,
-                    },
-                );
-                actions_with_ids.push(ActionWithId {
-                    id: fix_id,
-                    description: action.title,
-                    diff,
-                });
             }
-        }
+            results
+        })
+        .await
+        .map_err(ToolboxError::TaskJoin)?;
 
         let json_output = serde_json::to_string_pretty(&actions_with_ids)?;
         let guidance = if actions_with_ids.is_empty() {
-            "No automatic fixes found for this diagnostic. Next: Use `get_symbol_info` or `list_document_symbols` to understand the code and manually fix the issue."
+            "No automatic fixes found for this diagnostic/location. Next: Use `get_symbol_info` or `list_document_symbols` to understand the code and manually fix the issue."
         } else {
             "Review the available fixes and their diffs. Next: Use `apply_fix` with the chosen 'id'."
         };
@@ -591,12 +798,14 @@ Next Step: {}",
     pub async fn apply_fix(&self, fix_id: String) -> ToolResult<String> {
         let (name, server) = self.get_active_server().await?;
 
+        // Remove from cache - if not found, error
         let cached_fix = self
             .fix_cache
             .remove(&fix_id)
             .ok_or_else(|| ToolboxError::FixNotFound(fix_id.clone()))?
-            .1;
+            .1; // Get the value part
 
+        // Security check
         if cached_fix.project_name != name {
             warn!(
                 "[{}] Attempted to apply fix {} belonging to project {}",
@@ -614,7 +823,10 @@ Next Step: {}",
         // IMPORTANT: Applying ANY fix invalidates ALL other cached fixes AND diagnostics for this project
         self.clear_all_cache_for_project(&name);
 
-        let file_edits = workspace_edit_to_file_edits(&cached_fix.edit)
+        let edit_clone = cached_fix.edit.clone();
+        let file_edits = spawn_blocking(move || workspace_edit_to_file_edits(&edit_clone))
+            .await
+            .map_err(ToolboxError::TaskJoin)?
             .map_err(|e| ToolboxError::ApplyEditFailed(format!("Conversion error: {}", e)))?;
 
         info!(
@@ -623,17 +835,21 @@ Next Step: {}",
             fix_id,
             file_edits.len()
         );
+        // Apply edits and notify server for each file
         for file_edit in file_edits {
             let path = file_edit.path.clone();
+            // Relative path just for logging
             let rel_path = self.get_relative_path(&server, &path);
             let server_clone = server.clone();
             debug!("[{}] Applying edits to {}", name, rel_path);
-            let new_content = tokio::task::spawn_blocking(move || {
-                apply_lsp_edits_to_file(&file_edit.path, &file_edit.edits)
-            })
-            .await??;
+
+            let new_content =
+                spawn_blocking(move || apply_lsp_edits_to_file(&file_edit.path, &file_edit.edits))
+                    .await
+                    .map_err(ToolboxError::TaskJoin)??; // Handle JoinError and ToolResult
 
             // CRITICAL: Notify RA server about the file change on disk to sync VFS
+            // This is an async LSP notification
             server_clone
                 .notify_file_content(&path, &new_content)
                 .await
@@ -643,10 +859,13 @@ Next Step: {}",
                         rel_path, e
                     ))
                 })?;
-            sleep(Duration::from_millis(150)).await;
+            sleep(Duration::from_millis(200)).await;
         }
+        // Optional: trigger a save notification if client supports it
+        // server.send_notification::<DidSaveTextDocument>(...).await?;
+
         Ok(format!(
-            "Success: Applied fix '{}'.\n\n---\nNext Step: Run 'list_diagnostics' again to verify the fix and check for new issues.",
+            "Success: Applied fix '{}'. Cache cleared.\n\n---\nNext Step: Run 'list_diagnostics' with force_recheck=true to verify the fix and check for new issues, or 'test_project'.",
             fix_id
         ))
     }
@@ -656,14 +875,16 @@ Next Step: {}",
         let (name, server) = self.get_active_server().await?;
         info!("[{}] Getting file tree", name);
         let root = server.root_path().to_path_buf();
-        let tree = tokio::task::spawn_blocking(move || {
+        let tree = spawn_blocking(move || {
             get_file_tree_string(
                 &root,
                 Some(DEFAULT_FILE_TREE_MAX_ITEMS),
                 Some(DEFAULT_FILE_TREE_MAX_DEPTH),
             )
         })
-        .await??;
+        .await
+        .map_err(ToolboxError::TaskJoin)??; // Handle JoinError and ToolResult
+
         Ok(format!(
             "{}\n\n---\nNext Step: Use this tree to identify relevant files. Use client-side I/O to read file content, `list_document_symbols` to explore a file's structure, or `list_diagnostics` to find issues.",
             tree
@@ -676,18 +897,35 @@ Next Step: {}",
         let (_, abs_path, _) = self.validate_and_resolve_path(&file_path).await?;
         info!("[{}] Listing symbols for {}", name, file_path);
 
+        // Async LSP request
         let symbols = server
             .list_document_symbols(&abs_path)
             .await
             .map_err(ToolboxError::ServerError)?;
-        let mut flat_symbols = Vec::new();
+
+        // Create a function that doesn't capture self
         let server_clone = server.clone();
-        // Use a closure to capture self and server for the helper
-        let get_rel = |p: &Path| self.get_relative_path(&server_clone, p);
-        flatten_document_symbols(&symbols, abs_path, &mut flat_symbols, &get_rel);
+        // Pre-compute the path resolver function result
+        let abs_path_clone = abs_path.clone();
+        let path_resolver = move |p: &Path| -> String {
+            // Implement path resolution logic directly without using self
+            if let Some(rel) = diff_paths(p, server_clone.root_path()) {
+                rel.to_string_lossy().to_string()
+            } else {
+                p.to_string_lossy().to_string()
+            }
+        };
+
+        let flat_symbols: Vec<FlatSymbol> = spawn_blocking(move || {
+            let mut flat = Vec::new();
+            flatten_document_symbols(&symbols, abs_path_clone, &mut flat, &path_resolver);
+            flat
+        })
+        .await
+        .map_err(ToolboxError::TaskJoin)?;
 
         let json_output = serde_json::to_string_pretty(&flat_symbols)?;
-        let guidance = "Review the symbols. Next: Use `get_symbol_info` with file_path, line, and column to get details about a specific symbol.";
+        let guidance = "Review the symbols. Next: Use `get_symbol_info` with file_path and EITHER line/character OR symbol_name to get details.";
         Ok(format!("{}\n\n---\nNext Step: {}", json_output, guidance))
     }
 
@@ -697,7 +935,7 @@ Next Step: {}",
         &self,
         file_path: String,
         line: Option<u32>,           // Make Optional
-        column: Option<u32>,         // Make Optional
+        character: Option<u32>,      // Make Optional
         symbol_name: Option<String>, // Add parameter
     ) -> ToolResult<String> {
         let (name, server) = self.get_active_server().await?;
@@ -705,15 +943,19 @@ Next Step: {}",
 
         let target_pos: Option<Position>;
         let mut symbol_not_found_msg = None;
+        // Input position is 1-based from user, convert to 0-based
+        let input_line = line.map(|l| l.saturating_sub(1));
+        let input_char = character.map(|c| c.saturating_sub(1));
 
-        match (line, column, &symbol_name) {
+        match (input_line, input_char, &symbol_name) {
             // Case 1: Position-based lookup
             (Some(l), Some(c), _) => {
                 info!(
                     "[{}] Getting symbol info for {}:{}:{} (by position)",
-                    name, file_path, l, c
+                     name, file_path, l+1, c+1 // log 1-based
                 );
-                target_pos = Some(Position { line: l, column: c });
+                 // Use 0-based
+                target_pos = Some(Position { line: l, character: c });
             },
             // Case 2: Name-based lookup
             (None, None, Some(sym_name)) => {
@@ -722,26 +964,34 @@ Next Step: {}",
                     name, sym_name, file_path
                 );
                 // Find the symbol definition within this document
+                 // Async LSP request
                 let symbols: Vec<DocumentSymbol> = server
                     .list_document_symbols(&abs_path)
                     .await
                     .map_err(ToolboxError::ServerError)?;
 
-                if let Some(found_symbol) = find_symbol_by_name_in_hierarchy(&symbols, sym_name) {
-                    // Use the start of the symbol's selection range as the target position
-                    target_pos = Some(lsp_position_to_my(&found_symbol.selection_range.start));
-                    debug!("[{}] Found symbol '{}' at {:?}", name, sym_name, target_pos);
-                } else {
+                 let sym_name_clone = sym_name.clone();
+                 let found_symbol_pos: Option<Position> = spawn_blocking(move || {
+                      find_symbol_by_name_in_hierarchy(&symbols, &sym_name_clone)
+                           // Use the start of the symbol's selection range as the target position
+                          .map(|found| found.selection_range.start.into())
+                  }).await.map_err(ToolboxError::TaskJoin)?;
+
+                if let Some(pos) = found_symbol_pos {
+                     target_pos = Some(pos);
+                     debug!("[{}] Found symbol '{}' definition at {:?}", name, sym_name, target_pos);
+                 }
+                else {
                     // Symbol name not defined in this file
                     target_pos = None;
                     symbol_not_found_msg = Some(format!(
-                        "Info: Symbol definition '{}' not found in file '{}'.\nIt might be defined elsewhere, or the name is incorrect.\n\n---\nNext Step: Use `search_workspace_symbols` to find the definition file, or provide line/column of the symbol's *usage* in this file.",
+                        "Info: Symbol definition '{}' not found within file '{}'.\nIt might be defined elsewhere, or the name is incorrect.\n\n---\nNext Step: Use `search_workspace_symbols` to find the definition file, or provide line/character of the symbol's *usage* in this file.",
                         sym_name, file_path
                     ));
                 }
             },
             // Case 3: Invalid parameters
-            _ => return Err(ToolboxError::Other("Invalid parameters for get_symbol_info: Provide EITHER both 'line' and 'column', OR 'symbol_name'.".into())),
+            _ => return Err(ToolboxError::Other("Invalid parameters for get_symbol_info: Provide EITHER both 'line' and 'character' (0-based), OR 'symbol_name'.".into())),
         }
 
         // If name lookup failed, return the specific message
@@ -752,9 +1002,9 @@ Next Step: {}",
         let pos = match target_pos {
             Some(p) => p,
             None => {
+                // Should be unreachable due to prior checks
                 return Ok(format!(
-                    // Fallback
-                    "Info: Could not determine position for symbol in {}.\n\n---\nNext Step: Verify parameters.",
+                    "Internal Error: Could not determine position for symbol in {}.\n\n---\nNext Step: Verify parameters.",
                     file_path
                 ));
             }
@@ -763,14 +1013,16 @@ Next Step: {}",
         // get_api_structure uses goto-definition internally, so it works whether
         // `pos` points to the definition itself (from name lookup)
         // or just a usage (from line/col lookup).
+        // This calls multiple async LSP requests
         let api_info_opt = server
             .get_api_structure(&abs_path, pos)
             .await
             .map_err(ToolboxError::ServerError)?;
 
-        let guidance = "Analyze the symbol details. Next: Use this information to understand diagnostics or plan code modifications.";
+        let guidance = "Analyze the symbol details. Next: Use this information to understand diagnostics or plan code modifications. For methods/fields, use `get_symbol_info` on their definition.";
         match api_info_opt {
             Some(api_info) => {
+                // <<< PERFORMANCE: Summary generation is fast, no blocking needed
                 let summary = api_info_to_summary(&api_info);
                 Ok(format!(
                     "{}
@@ -782,11 +1034,12 @@ Next Step: {}",
             }
             None => Ok(format!(
                 // Message reflects uncertainty of input method
-                "Info: No detailed symbol information or definition found for the symbol at or named near {}:{}:{}{:?}.\n\n---\nNext Step: {}",
+                "Info: No detailed symbol information or definition found for the symbol at {}:{}:{} or named '{}'.\n\n---\nNext Step: {}",
                 file_path,
-                line.unwrap_or(pos.line),
-                column.unwrap_or(pos.column),
-                symbol_name.as_deref().unwrap_or(""),
+                // Display 1-based
+                line.unwrap_or(pos.line + 1),
+                character.unwrap_or(pos.character + 1),
+                symbol_name.as_deref().unwrap_or("(none)"),
                 guidance
             )),
         }
@@ -801,59 +1054,64 @@ Next Step: {}",
             return Err(ToolboxError::Other("Search query cannot be empty".into()));
         }
 
+        // Async LSP request
         let symbols_response = server
             .search_workspace_symbols(&query)
             .await
             .map_err(ToolboxError::ServerError)?;
 
-        let symbols = match symbols_response {
-            Some(WorkspaceSymbolResponse::Flat(symbols)) => symbols,
-            Some(WorkspaceSymbolResponse::Nested(workspace_symbols)) => {
-                // Convert WorkspaceSymbol to SymbolInformation
-                workspace_symbols
-                    .into_iter()
-                    .map(|ws| {
-                        let location = match ws.location {
-                            OneOf::Left(location) => location,
-                            OneOf::Right(workspace_location) => {
-                                // Convert WorkspaceLocation to Location with empty range
-                                Location {
-                                    uri: workspace_location.uri,
-                                    range: Range {
-                                        start: lsp_types::Position {
-                                            line: 0,
-                                            character: 0,
+        // This block also uses rayon internally via workspace_symbols_to_flat_optimized.
+        let root_path = server.root_path().to_path_buf();
+        let flat_symbols = spawn_blocking(move || {
+            let symbols: Vec<SymbolInformation> = match symbols_response {
+                Some(WorkspaceSymbolResponse::Flat(symbols)) => symbols,
+                // Convert Nested WorkspaceSymbol to Flat SymbolInformation
+                Some(WorkspaceSymbolResponse::Nested(workspace_symbols)) => {
+                    workspace_symbols
+                        .into_iter()
+                        .map(|ws| {
+                            let location = match ws.location {
+                                OneOf::Left(location) => location,
+                                OneOf::Right(workspace_location) => {
+                                    // Convert WorkspaceLocation to Location with empty range
+                                    Location {
+                                        uri: workspace_location.uri,
+                                        // Use a dummy range 0:0
+                                        range: Range {
+                                            start: lsp_types::Position {
+                                                line: 0,
+                                                character: 0,
+                                            },
+                                            end: lsp_types::Position {
+                                                line: 0,
+                                                character: 0,
+                                            },
                                         },
-                                        end: lsp_types::Position {
-                                            line: 0,
-                                            character: 0,
-                                        },
-                                    },
+                                    }
                                 }
+                            };
+                            SymbolInformation {
+                                name: ws.name,
+                                kind: ws.kind,
+                                tags: ws.tags,
+                                #[allow(deprecated)]
+                                deprecated: None,
+                                location,
+                                container_name: ws.container_name,
                             }
-                        };
-                        SymbolInformation {
-                            name: ws.name,
-                            kind: ws.kind,
-                            tags: ws.tags,
-                            #[allow(deprecated)]
-                            deprecated: None,
-                            location,
-                            container_name: ws.container_name,
-                        }
-                    })
-                    .collect()
-            }
-            None => Vec::new(),
-        };
-
-        let server_clone = server.clone();
-        let get_rel = |p: &Path| self.get_relative_path(&server_clone, p);
-        let flat_symbols = workspace_symbols_to_flat(&symbols, &get_rel)
-            .map_err(|e| ToolboxError::Other(format!("Symbol conversion error: {}", e)))?;
+                        })
+                        .collect()
+                }
+                None => Vec::new(),
+            };
+            workspace_symbols_to_flat_optimized(&symbols, &root_path)
+                .map_err(|e| ToolboxError::Other(format!("Symbol conversion error: {}", e)))
+        })
+        .await
+        .map_err(ToolboxError::TaskJoin)??; // Handle JoinError and ToolResult
 
         let json_output = serde_json::to_string_pretty(&flat_symbols)?;
-        let guidance = "Review the search results. Next: Use `get_symbol_info` with file_path, line, and column to get details about a specific symbol.";
+        let guidance = "Review the search results. Next: Use `get_symbol_info` with file_path and EITHER line/character OR symbol_name to get details.";
         Ok(format!("{}\n\n---\nNext Step: {}", json_output, guidance))
     }
 
@@ -866,18 +1124,20 @@ Next Step: {}",
 
         let server_clone = server.clone();
         let output: CargoTestOutput =
-            tokio::task::spawn_blocking(move || server_clone.run_cargo_test(test_name.as_deref()))
-                .await??;
+            spawn_blocking(move || server_clone.run_cargo_test(test_name.as_deref()))
+                .await
+                .map_err(ToolboxError::TaskJoin)??; // Handle JoinError and ToolResult
 
         let guidance = if output.success {
             info!("[{}] Tests passed.", name);
             "All tests passed. The task is likely complete."
         } else {
             warn!("[{}] Tests failed.", name);
-            "Tests failed. Analyze the output. Use `list_diagnostics`, `get_symbol_info`, or client-side file reading to understand the issue, then fix using `apply_fix` or manual edits."
+            "Tests failed. Analyze the output. Use `list_diagnostics` (with force_recheck=true), `get_symbol_info`, or client-side file reading to understand the issue, then fix using `apply_fix` or manual edits."
         };
+        // Combine output for failures
         let report = if output.success {
-            output.stdout
+            format!("--- STDOUT ---\n{}", output.stdout)
         } else {
             format!(
                 "--- STDOUT ---\n{}\n--- STDERR ---\n{}",
@@ -890,15 +1150,41 @@ Next Step: {}",
     /// Gracefully shuts down all managed RaServer instances.
     pub async fn shutdown_all(&self) -> ToolResult<()> {
         info!("Toolbox shutting down all managed servers...");
+        // Collect keys first to avoid modifying map while iterating
         let keys: Vec<_> = self.servers.iter().map(|s| s.key().clone()).collect();
         info!("Found {} servers to shut down.", keys.len());
-        for key in keys {
-            if let Some((_, server)) = self.servers.remove(&key) {
-                info!("Shutting down server for project: {}", key);
-                server.shutdown().await.map_err(ToolboxError::ServerError)?;
-                self.clear_all_cache_for_project(&key);
+        // Create a list of shutdown futures
+        let mut servers_to_shutdown = Vec::new();
+
+        // First collect all servers that need to be shut down
+        for key in &keys {
+            if let Some((_, server)) = self.servers.remove(key) {
+                servers_to_shutdown.push(server);
             }
         }
+
+        // Then create shutdown futures
+        let shutdown_futures: Vec<_> = servers_to_shutdown
+            .iter()
+            .map(|server| server.shutdown())
+            .collect();
+
+        let results = futures_util::future::join_all(shutdown_futures).await;
+
+        // Report any errors during shutdown
+        for (i, result) in results.into_iter().enumerate() {
+            if let Err(e) = result {
+                error!(
+                    "Error shutting down server for project '{}': {}",
+                    keys.get(i).unwrap_or(&"?".to_string()),
+                    e
+                );
+            }
+            if let Some(key) = keys.get(i) {
+                self.clear_all_cache_for_project(key);
+            }
+        }
+
         self.fix_cache.clear();
         self.diagnostics_cache.clear();
         *self.active_project.write().await = None;

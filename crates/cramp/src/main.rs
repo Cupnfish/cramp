@@ -307,9 +307,20 @@ async fn main() -> Result<()> {
             };
             run_server(args).await
         }
-        Command::Sse { host, port, sse_path, message_path, serve_args } => {
+        Command::Sse {
+            host,
+            port,
+            sse_path,
+            message_path,
+            serve_args,
+        } => {
             let args = ServeArgs {
-                transport: TransportCommand::Sse { host, port, sse_path, message_path },
+                transport: TransportCommand::Sse {
+                    host,
+                    port,
+                    sse_path,
+                    message_path,
+                },
                 enable_control_api: serve_args.enable_control_api,
                 control_port: serve_args.control_port,
                 request_timeout: serve_args.request_timeout,
@@ -320,7 +331,12 @@ async fn main() -> Result<()> {
             };
             run_server(args).await
         }
-        Command::StreamHttp { host, port, path, serve_args } => {
+        Command::StreamHttp {
+            host,
+            port,
+            path,
+            serve_args,
+        } => {
             let args = ServeArgs {
                 transport: TransportCommand::StreamHttp { host, port, path },
                 enable_control_api: serve_args.enable_control_api,
@@ -499,8 +515,8 @@ async fn run_stdio(
             );
             let listener = tokio::net::TcpListener::bind(addr).await?;
             let control_app = Router::new().nest(CONTROL_API_PATH, router);
-            let control_future =
-                axum::serve(listener, control_app).with_graceful_shutdown(token.clone().cancelled_owned());
+            let control_future = axum::serve(listener, control_app)
+                .with_graceful_shutdown(token.clone().cancelled_owned());
 
             // Run both concurrently
             tokio::select! {
@@ -740,7 +756,9 @@ async fn run_control_client(args: ControlArgs) -> Result<()> {
             } else {
                 std::env::current_dir()?.join(path)
             };
-            let payload = AddProjectRequest { path: absolute_path };
+            let payload = AddProjectRequest {
+                path: absolute_path,
+            };
             client
                 .post(format!("{}/projects", base_url))
                 .json(&payload)
