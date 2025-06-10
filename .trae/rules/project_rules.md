@@ -72,27 +72,31 @@ The sequence `list_diagnostics` → `get_code_actions` → `apply_fix` is the **
 ### Phase 2: Strategic Code Investigation (Conditional)
 **Objective**: Gather necessary context for understanding and fixing issues
 
-2. **`list_document_symbols`** - Analyze symbols within specific problematic files
+2. **`get_file_tree`** - Map project structure and identify key components
+   - **Purpose**: Understand project organization and locate relevant files
+   - **Focus**: Pay attention to source directories, test directories, and configuration files
+
+3. **`list_document_symbols`** - Analyze symbols within specific problematic files
    - **Purpose**: Understand file-level structure (functions, structs, implementations)
    - **Strategy**: Target files mentioned in diagnostic messages
 
-3. **`search_workspace_symbols`** - Locate symbols across the entire workspace
+4. **`search_workspace_symbols`** - Locate symbols across the entire workspace
    - **Purpose**: Find definitions, implementations, and usages of problematic symbols
    - **Scope**: Use when diagnostics reference symbols not immediately visible
 
-4. **`get_symbol_info`** - Obtain detailed information about specific symbols
+5. **`get_symbol_info`** - Obtain detailed information about specific symbols
    - **Purpose**: Get precise location, signature, and context of symbols
    - **Precision**: Use exact coordinates from previous symbol searches
 
 ### Phase 3: Automated Repair Execution (Preferred Path)
 **Objective**: Apply automated fixes when available and suitable
 
-5. **`get_code_actions`** - Query available automatic fixes for specific diagnostics
+6. **`get_code_actions`** - Query available automatic fixes for specific diagnostics
    - **Precision**: Use EXACT `file_path` and `diagnostic_message` from latest `list_diagnostics`
    - **Evaluation**: Review fix descriptions and diff previews carefully
    - **Decision**: Proceed only if fix addresses the root cause appropriately
 
-6. **`apply_fix`** - Execute the selected automatic fix
+7. **`apply_fix`** - Execute the selected automatic fix
    - **Critical**: This invalidates ALL `fix_id`s and diagnostic cache
    - **Immediate Action**: Must run `list_diagnostics` immediately after
    - **Verification**: Confirm the fix was applied successfully
@@ -100,12 +104,12 @@ The sequence `list_diagnostics` → `get_code_actions` → `apply_fix` is the **
 ### Phase 4: Manual Repair Implementation (Fallback Path)
 **Objective**: Address issues when automated fixes are unavailable or unsuitable
 
-7. **Manual Code Modification** - Use your environment's file editing capabilities
+8. **Manual Code Modification** - Use your environment's file editing capabilities
    - **Approach**: Apply targeted fixes based on diagnostic analysis and code investigation
    - **Best Practices**: Make minimal, focused changes that address root causes
    - **Documentation**: Consider adding comments explaining complex fixes
 
-8. **`list_diagnostics`** - Mandatory re-check after manual changes
+9. **`list_diagnostics`** - Mandatory re-check after manual changes
     - **Purpose**: Cache invalidation and fresh diagnostic assessment
     - **Critical**: This step is NON-OPTIONAL after any manual edit
     - **Analysis**: Verify manual changes resolved intended issues without introducing new ones
@@ -113,12 +117,12 @@ The sequence `list_diagnostics` → `get_code_actions` → `apply_fix` is the **
 ### Phase 5: Comprehensive Verification & Validation
 **Objective**: Ensure fixes are complete, correct, and don't introduce regressions
 
-9. **`test_project`** - Execute project test suite
+10. **`test_project`** - Execute project test suite
     - **Purpose**: Verify fixes don't break existing functionality
     - **Critical**: This invalidates ALL `fix_id`s and diagnostic cache
     - **Analysis**: Review test results for any new failures or regressions
 
-10. **`list_diagnostics`** - Final diagnostic verification
+11. **`list_diagnostics`** - Final diagnostic verification
     - **Purpose**: Confirm all targeted issues are resolved
     - **Success Criteria**: Zero errors, minimal warnings
     - **Completion**: Project is ready for use when diagnostics are clean
@@ -166,6 +170,7 @@ graph TD
          direction TB
 		  3a-Info["get_symbol_info (API details)"]
 		  3b-Symbols["list_document_symbols / search_workspace_symbols"]
+          3c-Tree["get_file_tree (if needed)"]
           3d-Read["CLIENT: Read File Content"]
           3e-Write["CLIENT: Apply Manual Edit"]
           3a-Info --> 3b-Symbols
@@ -230,6 +235,7 @@ graph TD
         *   **`get_symbol_info`**: Get API details (docs, signature, definition structure, methods, fields) for the code symbol. Provide `file_path` AND EITHER `line`/`character` (0-based) OR `symbol_name`. Output is Markdown.
 		*   **`list_document_symbols`**: Get JSON list of symbols (structs, funcs, etc.) in a `file_path`. Locations are **0-based**.
 		*   **`search_workspace_symbols`**: Find symbols matching `query` across the project. JSON list, locations are **0-based**.
+        *   **`get_file_tree`**: Get text tree to understand project structure.
         *    **CLIENT-SIDE: Read File Content**: Use your environment's capability to read code from `file_path` (relative) based on information from diagnostics or symbol tools.
         *    **CLIENT-SIDE: Apply Manual Edit**: Use your environment's capability to write/modify code.
             *   **Side-effect**: Makes server state (cache, LSP VFS) stale.
@@ -265,6 +271,8 @@ graph TD
      *   Modifies files on disk and notifies the internal LSP server.
      *   **Invalidates ALL `fix_id`s AND the diagnostic cache**.
      *   MUST re-run `list_diagnostics` after calling.
+*   **`get_file_tree()`**
+    *   Exploration. Output is a text tree with relative paths.
 *   **`list_document_symbols(file_path: String)`**
      *   Exploration. `file_path` is relative.
      *   Output `line` and `character` are **0-based** (JSON).

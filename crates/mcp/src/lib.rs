@@ -175,13 +175,6 @@ impl McpToolboxService {
     }
 
     #[tool(
-        description = "Generates a comprehensive file and directory tree structure of the active Rust project, automatically respecting .gitignore rules and common ignore patterns. Returns a human-readable text-based tree representation showing the project's organization. Useful for understanding project layout and navigation. Does not read or return actual file contents - use client-side I/O for file reading."
-    )]
-    async fn get_file_tree(&self) -> Result<CallToolResult, McpError> {
-        to_mcp_result(|| self.toolbox.get_file_tree()).await
-    }
-
-    #[tool(
         description = "Analyzes and lists all high-level code symbols (structs, functions, traits, enums, modules, etc.) found in the specified Rust source file. Returns a detailed JSON list containing symbol names, types, locations with 0-based line/character positions, and hierarchical relationships. Essential for code navigation and understanding file structure before making modifications."
     )]
     async fn list_document_symbols(
@@ -239,7 +232,6 @@ This server provides specialized tools for intelligent interaction with Rust pro
 - **`apply_fix`**: Apply automatic code fixes using fix IDs
 
 ### Analysis Tools
-- **`get_file_tree`**: Generate project directory structure
 - **`list_document_symbols`**: List symbols within a specific file
 - **`get_symbol_info`**: Get detailed information about a specific symbol
 - **`search_workspace_symbols`**: Search for symbols across the entire project
@@ -262,7 +254,6 @@ This server provides specialized tools for intelligent interaction with Rust pro
   - CRITICAL: Invalidates ALL previously cached fix IDs when executed
 
 ### Investigation & Analysis
-- **`get_file_tree`**: Understand project structure and organization
 - **`list_document_symbols`**: Analyze symbols within specific files (JSON output)
   - Requires: `file_path` (relative to project root)
 - **`search_workspace_symbols`**: Find symbols across entire project with fuzzy matching

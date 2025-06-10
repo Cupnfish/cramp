@@ -23,9 +23,6 @@ use tokio::task::spawn_blocking;
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
-const DEFAULT_FILE_TREE_MAX_ITEMS: usize = 150; // Increase limit slightly
-const DEFAULT_FILE_TREE_MAX_DEPTH: usize = 4; // Reduce depth for performance
-
 // Fuzzy matching optimization constants
 const SIMILARITY_THRESHOLD: f64 = 0.8; // Early exit threshold for good matches
 const MAX_FUZZY_CANDIDATES: usize = 50; // Limit search scope to avoid excessive computation
@@ -625,26 +622,6 @@ Next Step: {}",
         ))
     }
 
-    // --- get_file_tree ---
-    pub async fn get_file_tree(&self) -> ToolResult<String> {
-        let (name, server) = self.get_active_server().await?;
-        info!("[{}] Getting file tree", name);
-        let root = server.root_path().to_path_buf();
-        let tree = spawn_blocking(move || {
-            get_file_tree_string(
-                &root,
-                Some(DEFAULT_FILE_TREE_MAX_ITEMS),
-                Some(DEFAULT_FILE_TREE_MAX_DEPTH),
-            )
-        })
-        .await
-        .map_err(ToolboxError::TaskJoin)??; // Handle JoinError and ToolResult
-
-        Ok(format!(
-            "{}\n\n---\nNext Step: Use this tree to identify relevant files. Use client-side I/O to read file content, `list_document_symbols` to explore a file's structure, or `list_diagnostics` to find issues.",
-            tree
-        ))
-    }
 
     // --- list_document_symbols ---
     pub async fn list_document_symbols(&self, file_path: String) -> ToolResult<String> {
